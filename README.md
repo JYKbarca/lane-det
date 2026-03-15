@@ -319,3 +319,140 @@ train:
   - 目的：提升训练/推理效率
   - 修改位置：`tools/train.py`、`lane_det/utils/`
   - 建议：若时间充足再做（非必需）
+
+
+  代码架构
+  /root/project/lane-det/
+├── .gitignore
+├── README.md
+├── requirements.txt
+├── command.txt
+│
+├── configs/
+│   ├── tusimple_res18_fpn.yaml
+│   ├── tusimple_res18_fpn_matchv2.yaml
+│   └── tusimple_test.yaml
+│
+├── lane_det/                          # 核心 Python 包
+│   ├── __init__.py
+│   │
+│   ├── anchors/
+│   │   ├── __init__.py
+│   │   ├── anchor_generator.py
+│   │   └── label_assigner.py
+│   │
+│   ├── datasets/
+│   │   ├── __init__.py
+│   │   ├── tusimple.py
+│   │   └── transforms.py
+│   │
+│   ├── losses/
+│   │   ├── __init__.py
+│   │   ├── focal_loss.py
+│   │   ├── reg_loss.py
+│   │   └── soft_line_loss.py
+│   │
+│   ├── metrics/
+│   │   ├── __init__.py
+│   │   └── tusimple_converter.py
+│   │
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── backbone.py
+│   │   ├── detector.py
+│   │   ├── fpn.py
+│   │   ├── head.py
+│   │   └── anchor_feature_pooler.py
+│   │
+│   ├── postprocess/
+│   │   ├── __init__.py
+│   │   └── decoder.py
+│   │
+│   └── utils/
+│       ├── __init__.py
+│       └── config.py
+│
+├── tools/
+│   ├── train.py
+│   ├── evaluate.py
+│   ├── infer.py
+│   ├── visualize.py
+│   ├── vis_dataset.py
+│   ├── plot_loss.py
+│   └── prepare_tusimple_split.py
+│
+├── tests/
+│   ├── test_losses.py
+│   └── test_models.py
+│
+└── *.md (技术文档)
+    ├── ANCHOR_MATCHING_SPEC.md
+    ├── CURRENT_TECHNICAL_PATH.md
+    ├── MATCH_OPTIMIZATION_STEPS.md
+    ├── anchor_match.md
+    ├── compere_find.md
+    ├── final_refine.md
+    ├── good_sample.md
+    ├── refine_loss.md
+    ├── refine_module.md
+    └── train_process.md
+
+    /root/autodl-tmp/
+├── .autodl/
+│   ├── autopanel.monitor.db
+│   └── autopanel.security.db
+│
+├── checkpoints/                       # 模型 checkpoint（空或少量）
+│
+├── outputs/                           # 训练/推理输出
+│
+└── datasets/
+    │
+    ├── tusimple/                      # 当前使用的 TuSimple 数据
+    │   ├── train.json                 # 训练集索引
+    │   ├── val.json                   # 验证集索引
+    │   ├── label_data_0313.json
+    │   ├── label_data_0531.json
+    │   ├── label_data_0601.json
+    │   │
+    │   └── clips/
+    │       ├── 0313-1/
+    │       │   ├── 10000/              # clip_id
+    │       │   │   ├── 1.jpg
+    │       │   │   ├── 2.jpg
+    │       │   │   └── ... (20 帧)
+    │       │   ├── 10020/
+    │       │   └── ...
+    │       ├── 0313-2/
+    │       ├── 0531/
+    │       └── 0601/
+    │
+    └── archive/                       # 归档数据
+        ├── test_label_new.json
+        │
+        └── TUSimple/
+            ├── test_label.json
+            │
+            ├── test_set/
+            │   ├── readme.md
+            │   ├── test_tasks_0627.json
+            │   └── clips/
+            │       └── 0530/
+            │           ├── 1492626047222176976_0/
+            │           │   ├── 1.jpg
+            │           │   ├── 2.jpg
+            │           │   └── ... (20 帧)
+            │           ├── 1492626126171818168_0/
+            │           └── ... (更多 clip)
+            │
+            └── train_set/
+                ├── readme.md
+                ├── label_data_0313.json
+                ├── label_data_0531.json
+                ├── label_data_0601.json
+                └── clips/
+                    ├── 0313-1/
+                    ├── 0313-2/
+                    ├── 0531/
+                    └── 0601/
+                    └── (结构同 tusimple/clips)

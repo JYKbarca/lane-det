@@ -385,6 +385,8 @@ class TuSimpleDataset(Dataset):
         if key in self.anchor_cache:
             return self.anchor_cache[key]
 
+        cache_dir = self.cfg.get("paths", {}).get("anchor_cache", "outputs/cache/anchors")
+
         generator = AnchorGenerator(
             img_size=[w, h],
             num_y=num_y,
@@ -393,7 +395,7 @@ class TuSimpleDataset(Dataset):
             side_y_step=self.anchor_cfg.get("side_y_step", 20),
             side_y_start_ratio=self.anchor_cfg.get("side_y_start_ratio", 0.5),
             side_angle_min=self.anchor_cfg.get("side_angle_min", 10.0),
-            cache_dir="outputs/cache/anchors",
+            cache_dir=cache_dir,
             use_cache=True,
             y_samples=h_samples,
         )

@@ -45,9 +45,11 @@ class AnchorGenerator:
         self.use_cache = use_cache and cache_dir is not None
 
     @classmethod
-    def from_config(cls, cfg: Dict[str, Any], cache_dir: Optional[str] = "outputs/cache/anchors"):
+    def from_config(cls, cfg: Dict[str, Any], cache_dir: Optional[str] = None):
         acfg = cfg["anchor"]
         dcfg = cfg["dataset"]
+        if cache_dir is None:
+            cache_dir = cfg.get("paths", {}).get("anchor_cache", "outputs/cache/anchors")
         return cls(
             img_size=dcfg["img_size"],
             num_y=acfg.get("num_y", dcfg["y_samples"]),

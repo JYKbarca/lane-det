@@ -2,6 +2,36 @@ import torch
 import torch.nn as nn
 from .anchor_feature_pooler import AnchorFeaturePooler
 
+
+class LaneSequenceHead(nn.Module):
+    def __init__(self, in_channels, hidden_channels=None, num_layers=3, kernel_size=3):
+        super().__init__()
+        hidden_channels = int(in_channels if hidden_channels is None else hidden_channels)
+        num_layers = max(1, int(num_layers))
+        kernel_size = max(1, int(kernel_size))
+        if kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be odd for same-length sequence modeling")
+        padding = kernel_size // 2
+
+        layers = []
+        cur_in = int(in_channels)
+        for _ in range(num_layers):
+            layers.extend(
+                [
+                    nn.Conv1d(cur_in, hidden_channels, kernel_size, padding=padding, bias=False),
+                    nn.BatchNorm1d(hidden_channels),
+                    nn.ReLU(inplace=True),
+                ]
+            )
+            cur_in = hidden_channels
+        self.feature_extractor = nn.Sequential(*layers)
+        self.pred = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+
+    def forward(self, x):
+        x = self.feature_extractor(x)
+        return self.pred(x)
+
+
 class AnchorHead(nn.Module):
     def __init__(
         self,
@@ -10,6 +40,9 @@ class AnchorHead(nn.Module):
         use_masked_pooling=True,
         debug_shapes=False,
         use_refinement=False,
+        reg_seq_layers=3,
+        reg_hidden_channels=None,
+        reg_kernel_size=3,
     ):
         super(AnchorHead, self).__init__()
         # Default num_levels is 4 assuming use_c2=True inside LaneFPN configuration.
@@ -24,12 +57,7 @@ class AnchorHead(nn.Module):
         self.debug_shapes = bool(debug_shapes)
         self.use_refinement = bool(use_refinement)
         self._debug_printed = False
-        
-        # Shared feature extraction
-        self.conv_shared = nn.Conv1d(in_channels, in_channels, 1)
-        self.bn_shared = nn.BatchNorm1d(in_channels)
-        self.relu = nn.ReLU()
-        
+
         # Classification head
         # Takes pooled features (mean over Y) -> [B, C, Num_Anchors]
         self.cls_head = nn.Sequential(
@@ -39,20 +67,21 @@ class AnchorHead(nn.Module):
             nn.Conv1d(in_channels, 1, 1) # Output: [B, 1, Num_Anchors]
         )
         
-        # Stage1 regression head (coarse offsets).
-        self.reg_head_stage1 = nn.Sequential(
-            nn.Conv1d(in_channels, in_channels, 1),
-            nn.BatchNorm1d(in_channels),
-            nn.ReLU(),
-            nn.Conv1d(in_channels, 1, 1)  # Output: [B, 1, Num_Anchors * Num_Y]
+        # Sequence heads model lane geometry along the Y dimension instead of
+        # treating all sampled points as independent flattened tokens.
+        self.reg_head_stage1 = LaneSequenceHead(
+            in_channels=in_channels,
+            hidden_channels=reg_hidden_channels,
+            num_layers=reg_seq_layers,
+            kernel_size=reg_kernel_size,
         )
 
         # Stage2 regression head (delta offsets).
-        self.reg_head_stage2 = nn.Sequential(
-            nn.Conv1d(in_channels, in_channels, 1),
-            nn.BatchNorm1d(in_channels),
-            nn.ReLU(),
-            nn.Conv1d(in_channels, 1, 1),  # Output: [B, 1, Num_Anchors * Num_Y]
+        self.reg_head_stage2 = LaneSequenceHead(
+            in_channels=in_channels,
+            hidden_channels=reg_hidden_channels,
+            num_layers=reg_seq_layers,
+            kernel_size=reg_kernel_size,
         )
 
     def pool_anchors(self, features, anchors, img_h, img_w):
@@ -100,14 +129,14 @@ class AnchorHead(nn.Module):
         cls_logits = cls_logits.squeeze(1) # [B, Num_Anchors]
         
         # 3. Regression stage1
-        # Reshape to [B, C, Num_Anchors * Num_Y] to apply Conv1d
-        pooled_flat = pooled.view(b, c, -1)
-        reg_stage1 = self.reg_head_stage1(pooled_flat) # [B, 1, Num_Anchors * Num_Y]
-        reg_stage1 = reg_stage1.view(b, num_anchors, num_y) # [B, Num_Anchors, Num_Y]
+        # Model each anchor as a feature sequence along Y: [B * NumAnchors, C, NumY]
+        seq_features = pooled.permute(0, 2, 1, 3).contiguous().view(b * num_anchors, c, num_y)
+        reg_stage1 = self.reg_head_stage1(seq_features).squeeze(1)
+        reg_stage1 = reg_stage1.view(b, num_anchors, num_y)
 
         # 4. Regression stage2 refinement
         if self.use_refinement:
-            reg_delta_stage2 = self.reg_head_stage2(pooled_flat) # [B, 1, Num_Anchors * Num_Y]
+            reg_delta_stage2 = self.reg_head_stage2(seq_features).squeeze(1)
             reg_delta_stage2 = reg_delta_stage2.view(b, num_anchors, num_y)
             reg_final = reg_stage1 + reg_delta_stage2
         else:

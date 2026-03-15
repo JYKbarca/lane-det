@@ -64,7 +64,7 @@ def plot_loss(steps, total, cls, reg, output_path):
 def main():
     parser = argparse.ArgumentParser(description="Plot Loss Curve from Log File")
     parser.add_argument("--log", type=str, required=True, help="Path to train.log file")
-    parser.add_argument("--out", type=str, default="outputs/visualizations/loss_curve.png", help="Path to save plot image")
+    parser.add_argument("--out", type=str, default="/root/autodl-tmp/outputs/lane-det/visualizations/loss_curve.png", help="Path to save plot image")
     args = parser.parse_args()
     
     if not os.path.exists(args.log):

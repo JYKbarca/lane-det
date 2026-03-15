@@ -23,7 +23,7 @@ def write_jsonl(path: Path, records):
 
 def main():
     parser = argparse.ArgumentParser(description="Merge TuSimple label_data_*.json and split train/val.")
-    parser.add_argument("--root", default="data/tusimple", help="TuSimple root that contains label_data_*.json")
+    parser.add_argument("--root", default="/root/autodl-tmp/datasets/tusimple", help="TuSimple root that contains label_data_*.json")
     parser.add_argument("--val-ratio", type=float, default=0.1, help="Validation split ratio")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()

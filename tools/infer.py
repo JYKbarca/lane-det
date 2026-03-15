@@ -46,7 +46,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", type=str, required=True, help="Path to config file")
     parser.add_argument("--ckpt", type=str, required=True, help="Path to checkpoint file")
-    parser.add_argument("--out", type=str, default="pred.json", help="Path to save output json")
+    parser.add_argument("--out", type=str, default=None, help="Path to save output json")
     parser.add_argument("--score_thr", type=float, default=0.5, help="Score threshold for decoding")
     parser.add_argument("--nms_thr", type=float, default=30.0, help="Lane NMS distance threshold in pixels; <= 0 disables NMS")
     parser.add_argument("--disable-polyfit", action="store_true", help="Disable polynomial smoothing in decoder")
@@ -55,6 +55,8 @@ def main():
     # Load config
     with open(args.cfg, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    default_out = os.path.join(cfg.get("paths", {}).get("output_root", "outputs"), "pred", "pred.json")
+    out_path = args.out or default_out
         
     # Force remove list_file from config to allow split='val' to work
     # if "dataset" in cfg and "list_file" in cfg["dataset"]:
@@ -141,12 +143,12 @@ def main():
                 results.append(res)
                 
     # Save
-    out_dir = os.path.dirname(args.out)
+    out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
         
-    print(f"Saving results to {args.out}...")
-    TuSimpleConverter.save_json(results, args.out)
+    print(f"Saving results to {out_path}...")
+    TuSimpleConverter.save_json(results, out_path)
     print("Done.")
 
 if __name__ == "__main__":

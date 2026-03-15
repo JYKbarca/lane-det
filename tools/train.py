@@ -158,7 +158,7 @@ def log_pretrain_match_stats(dataset, logger, max_samples=200):
 def main():
     parser = argparse.ArgumentParser(description="Train Lane Detector")
     parser.add_argument("--cfg", type=str, required=True, help="Path to config file")
-    parser.add_argument("--work-dir", type=str, default="outputs/checkpoints", help="Directory to save checkpoints")
+    parser.add_argument("--work-dir", type=str, default=None, help="Directory to save checkpoints")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--pre-stat-max", type=int, default=200, help="Max samples for pretrain match statistics")
     args = parser.parse_args()
@@ -166,10 +166,12 @@ def main():
     # Load config
     with open(args.cfg, "r") as f:
         cfg = yaml.safe_load(f)
+    default_work_dir = cfg.get("paths", {}).get("checkpoint_root", "outputs/checkpoints")
+    work_root = args.work_dir or default_work_dir
         
     # Setup logger
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    work_dir = os.path.join(args.work_dir, timestamp)
+    work_dir = os.path.join(work_root, timestamp)
     os.makedirs(work_dir, exist_ok=True)
     logger = setup_logger(work_dir)
     logger.info(f"Config: {cfg}")

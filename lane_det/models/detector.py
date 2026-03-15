@@ -34,6 +34,9 @@ class LaneDetector(nn.Module):
             use_masked_pooling=model_cfg.get("use_masked_pooling", True),
             debug_shapes=model_cfg.get("debug_shapes", False),
             use_refinement=model_cfg.get("use_refinement", False),
+            reg_seq_layers=model_cfg.get("reg_seq_layers", 3),
+            reg_hidden_channels=model_cfg.get("reg_hidden_channels", fpn_out),
+            reg_kernel_size=model_cfg.get("reg_kernel_size", 3),
         )
 
     def forward(self, images, anchors=None, return_aux=False):

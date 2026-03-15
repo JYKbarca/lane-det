@@ -1,11 +1,16 @@
 dataset:
   name: tusimple
-  root: data/tusimple
-  list_file: data/tusimple/train.json
+  root: /root/autodl-tmp/datasets/tusimple
+  list_file: /root/autodl-tmp/datasets/tusimple/train.json
   img_size: [1280, 720]
   y_samples: 56
   mean: [0.485, 0.456, 0.406]
   std: [0.229, 0.224, 0.225]
+
+paths:
+  anchor_cache: /root/autodl-tmp/outputs/cache/anchors
+  checkpoint_root: /root/autodl-tmp/checkpoints/lane-det
+  output_root: /root/autodl-tmp/outputs/lane-det
 
 anchor:
   # Using dict format to specify range including outside image
