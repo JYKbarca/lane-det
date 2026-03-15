@@ -1,0 +1,72 @@
+dataset:
+  name: tusimple
+  root: data/tusimple
+  list_file: data/tusimple/train.json
+  img_size: [1280, 720]
+  y_samples: 56
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+anchor:
+  # Using dict format to specify range including outside image
+  # Bottom anchors (original)
+  x_positions:
+    start: 0
+    end: 1280
+    step: 10
+  angles: [-75,-70,-65,-60,-55,-50,-45,-40,-35,-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75]
+  # Side-anchor densification
+  side_y_step: 20
+  side_y_start_ratio: 0.5
+  side_angle_min: 10.0
+  num_y: 56
+  # Line IoU based assignment
+  line_iou_pos_thr: 0.35
+  line_iou_pos_thr_bottom: 0.38
+  line_iou_pos_thr_side: 0.27
+  line_iou_neg_thr: 0.10
+  line_iou_width: 25.0
+  line_iou_width_bottom: 25.0
+  line_iou_width_side: 35.0
+  # Stricter valid-point constraints
+  min_common_points: 3
+  min_common_points_bottom: 3
+  min_common_points_side: 2
+  min_common_ratio: 0.10
+  min_common_ratio_bottom: 0.12
+  min_common_ratio_side: 0.05
+  # Geometric gating thresholds
+  geo_angle_thr: 60.0
+  geo_x_bottom_thr: 350.0
+  # Top-region consistency constraint
+  top_region_ratio: 0.4
+  top_max_mean_err: 20.0
+  top_max_mean_err_bottom: 20.0
+  top_max_mean_err_side: 26.0
+  top_min_points: 2
+  top_min_points_bottom: 2
+  top_min_points_side: 0
+
+model:
+  backbone: resnet18
+  fpn_out: 128
+  head_channels: 128
+
+loss:
+  focal_alpha: 0.75
+  focal_gamma: 2.0
+  smooth_l1_beta: 1.0
+  cls_weight: 1.0
+  reg_weight: 1.0
+  
+  # Soft Line Overlap Loss settings
+  use_line_overlap_loss: true
+  line_loss_weight: 0.1
+  line_sigma: 12.0
+  line_min_valid_points: 3
+
+train:
+  batch_size: 4
+  lr: 0.001
+  epochs: 20
+  weight_decay: 0.0001

@@ -1,0 +1,4 @@
+baseline: {"name": "Accuracy", "value": 0.7985717067200707, "order": "desc"}, {"name": "FP", "value": 0.9312944256856271, "order": "asc"}, {"name": "FN", "value": 0.8448897675533339, "order": "asc"}
+pred_no_polyfit:{"name": "Accuracy", "value": 0.7985717067200707, "order": "desc"}, {"name": "FP", "value": 0.9312944256856271, "order": "asc"}, {"name": "FN", "value": 0.8448897675533339, "order": "asc"}
+no_nms:{"name": "Accuracy", "value": 0.8122983422340896, "order": "desc"}, {"name": "FP", "value": 0.9908573134829238, "order": "asc"}, {"name": "FN", "value": 0.804145698538227, "order": "asc"}
+low_score:{"name": "Accuracy", "value": 0.8018640238266401, "order": "desc"}, {"name": "FP", "value": 0.9422521254438715, "order": "asc"}, {"name": "FN", "value": 0.8435897435897584, "order": "asc"}

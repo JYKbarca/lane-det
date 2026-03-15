@@ -1,0 +1,14 @@
+--index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://pypi.org/simple
+
+torch==2.5.1
+torchvision==0.20.1
+
+numpy>=1.26,<3
+opencv-python>=4.8
+pillow>=10.0
+pyyaml>=6.0
+tqdm>=4.66
+matplotlib>=3.8
+tensorboard>=2.16
+scikit-learn>=1.4

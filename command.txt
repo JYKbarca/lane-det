@@ -1,0 +1,38 @@
+.venv\Scripts\activate
+
+
+python tools/vis_dataset.py --cfg configs/tusimple_res18_fpn.yaml --out outputs/visualizations/m2_check --show_match --max 20
+
+
+python tools/train.py --cfg configs/tusimple_res18_fpn.yaml
+
+python tools/train.py --cfg configs/tusimple_res18_fpn_matchv2.yaml --work-dir outputs/checkpoints/v2_match_loss
+
+
+推理指令：
+python tools/infer.py --cfg configs/tusimple_res18_fpn.yaml --ckpt outputs/checkpoints/20260303_151252/last.pth --out outputs/pred_v1.json
+
+可视化预测情况：
+python tools/visualize.py --pred outputs/pred_val.json --cfg configs/tusimple_res18_fpn.yaml --out outputs/visualizations/pred_2
+
+
+评估：
+# 假设您的测试集标签文件在 data/tusimple/val.json
+python tools/evaluate.py --pred outputs/pred_val.json --gt archive/TUSimple/test_label.json
+
+
+# 1. 推理（带 NMS）
+python tools/infer.py --cfg configs/tusimple_test.yaml --ckpt outputs/checkpoints/20260303_151252/last.pth --out pred_v1.json
+
+# 2. 评估
+python tools/evaluate.py --pred pred_v1.json --gt archive/TUSimple/test_label.json
+
+python tools/visualize.py --cfg configs/tusimple_test.yaml --out outputs/visualizations/pred_v1 --pred pred_v1.json
+
+python tools/infer.py --cfg configs/tusimple_test.yaml --ckpt outputs/checkpoints/refine_smoke/20260306_141514/last.pth --out pred_refine_3.json --score_thr 0.75 --nms_thr 45
+
+python tools/visualize.py --cfg configs/tusimple_test.yaml --out outputs/visualizations/pred_new1 --pred pred_new2.json
+
+
+
+python tools/infer.py --cfg configs/tusimple_test.yaml --ckpt outputs/checkpoints/v2_match_loss/20260309_143913/last.pth --out pred_v1.json
