@@ -7,7 +7,7 @@ import yaml
 import numpy as np
 import torch
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.data import DataLoader
 import sys
 
@@ -205,7 +205,9 @@ def main():
     )
     
     # Learning Rate Scheduler
-    scheduler = CosineAnnealingLR(optimizer, T_max=cfg["train"]["epochs"], eta_min=1e-5)
+    lr_milestones = cfg["train"].get("lr_milestones", [12, 18])
+    lr_gamma = cfg["train"].get("lr_gamma", 0.3)
+    scheduler = MultiStepLR(optimizer, milestones=lr_milestones, gamma=lr_gamma)
 
     # Gradient Accumulation Steps (Simulate larger batch size)
     accumulation_steps = 2

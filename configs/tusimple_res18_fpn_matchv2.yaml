@@ -85,6 +85,8 @@ train:
   lr: 0.001
   epochs: 17
   weight_decay: 0.0001
+  lr_milestones: [12, 18]
+  lr_gamma: 0.3
 
 # Step3: matching strategy skeleton (default keeps old behavior)
 match:

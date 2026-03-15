@@ -6,7 +6,7 @@ python tools/vis_dataset.py --cfg configs/tusimple_res18_fpn.yaml --out outputs/
 
 python tools/train.py --cfg configs/tusimple_res18_fpn.yaml
 
-python tools/train.py --cfg configs/tusimple_res18_fpn_matchv2.yaml --work-dir outputs/checkpoints/v2_match_loss
+python tools/train.py --cfg configs/tusimple_res18_fpn_matchv2.yaml --work-dir /root/autodl-tmp/checkpoints/lane-det
 
 
 推理指令：
