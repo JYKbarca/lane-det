@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 import time
 import datetime
@@ -18,6 +19,9 @@ from lane_det.datasets.tusimple import TuSimpleDataset
 from lane_det.models import LaneDetector
 from lane_det.losses import FocalLoss, RegLoss, SoftLineOverlapLoss
 from lane_det.anchors import AnchorSet
+from lane_det.postprocess import LaneDecoder
+from lane_det.metrics import TuSimpleConverter
+from evaluate import LaneEval
 
 def setup_logger(output_dir):
     logger = logging.getLogger("LaneDet")
@@ -85,7 +89,73 @@ def collate_fn(batch):
         "cls_labels": cls_labels,
         "offset_labels": offset_labels,
         "offset_masks": offset_masks,
-        "anchors": anchors
+        "anchors": anchors,
+        "metas": [b.get("meta", {}) for b in batch],
+    }
+
+
+def resolve_val_list_file(cfg):
+    list_file = cfg.get("dataset", {}).get("list_file", "")
+    root = cfg.get("dataset", {}).get("root", "")
+    if list_file:
+        return os.path.join(os.path.dirname(list_file), "val.json")
+    return os.path.join(root, "val.json")
+
+
+def validate(model, loader, samples, cfg, device):
+    model.eval()
+    eval_cfg = cfg.get("eval", {})
+    decoder = LaneDecoder(
+        score_thr=float(eval_cfg.get("score_thr", 0.5)),
+        nms_thr=float(eval_cfg.get("nms_thr", 30.0)),
+        use_polyfit=not bool(eval_cfg.get("disable_polyfit", False)),
+    )
+    converter = TuSimpleConverter()
+    gt_map = {item["raw_file"]: item for item in samples}
+
+    total_acc = 0.0
+    total_fp = 0.0
+    total_fn = 0.0
+    count = 0
+
+    with torch.no_grad():
+        for batch in loader:
+            if batch is None:
+                continue
+
+            images = batch["images"].to(device)
+            anchors = batch["anchors"]
+            metas = batch["metas"]
+
+            cls_logits, reg_preds = model(images, anchors)
+            img_h, img_w = images.shape[2], images.shape[3]
+            decoded_batch = decoder.decode(cls_logits, reg_preds, anchors, img_w, img_h)
+
+            for i, lanes in enumerate(decoded_batch):
+                raw_file = metas[i]["raw_file"]
+                gt = gt_map.get(raw_file)
+                if gt is None:
+                    continue
+
+                pred = converter.convert(lanes, raw_file, img_w, img_h, ori_w=1280, ori_h=720)
+                acc, fp, fn = LaneEval.bench(
+                    pred["lanes"],
+                    gt["lanes"],
+                    gt["h_samples"],
+                    pred["run_time"],
+                )
+                total_acc += acc
+                total_fp += fp
+                total_fn += fn
+                count += 1
+
+    if count == 0:
+        raise RuntimeError("No validation samples were evaluated.")
+
+    return {
+        "Accuracy": total_acc / count,
+        "FP": total_fp / count,
+        "FN": total_fn / count,
     }
 
 
@@ -192,6 +262,20 @@ def main():
     )
     logger.info(f"Train dataset size: {len(train_dataset)}")
     log_pretrain_match_stats(train_dataset, logger, max_samples=args.pre_stat_max)
+
+    val_cfg = copy.deepcopy(cfg)
+    val_cfg["dataset"]["list_file"] = resolve_val_list_file(cfg)
+    val_dataset = TuSimpleDataset(val_cfg, split="val")
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg.get("test", {}).get("batch_size", 1),
+        shuffle=False,
+        num_workers=0,
+        collate_fn=collate_fn,
+        drop_last=False
+    )
+    logger.info(f"Val dataset size: {len(val_dataset)}")
+    logger.info(f"Val list file: {val_cfg['dataset']['list_file']}")
     
     # Model
     model = LaneDetector(cfg)
@@ -233,12 +317,14 @@ def main():
     
     # Resume
     start_epoch = 0
+    best_acc = float("-inf")
     if args.resume:
         logger.info(f"Resuming from {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_epoch = checkpoint["epoch"] + 1
+        best_acc = float(checkpoint.get("best_acc", best_acc))
         # Synchronize scheduler if resuming
         for _ in range(start_epoch):
             scheduler.step()
@@ -346,6 +432,13 @@ def main():
         if use_line_loss:
             msg += f", Line: {avg_line:.4f}"
         logger.info(msg)
+
+        val_metrics = validate(model, val_loader, val_dataset.samples, cfg, device)
+        logger.info(
+            f"Validation: Accuracy={val_metrics['Accuracy']:.6f}, "
+            f"FP={val_metrics['FP']:.6f}, "
+            f"FN={val_metrics['FN']:.6f}"
+        )
         
         scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
@@ -367,6 +460,17 @@ def main():
             "optimizer": optimizer.state_dict(),
             "config": cfg,
         }, os.path.join(work_dir, "last.pth"))
+
+        if val_metrics["Accuracy"] > best_acc:
+            best_acc = val_metrics["Accuracy"]
+            torch.save({
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "config": cfg,
+                "best_acc": best_acc,
+            }, os.path.join(work_dir, "best.pth"))
+            logger.info(f"Saved best checkpoint with Accuracy={best_acc:.6f}")
 
 if __name__ == "__main__":
     main()

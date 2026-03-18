@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 import yaml
 import torch
@@ -15,6 +16,29 @@ from lane_det.models import LaneDetector
 from lane_det.anchors import AnchorSet
 from lane_det.postprocess import LaneDecoder
 from lane_det.metrics import TuSimpleConverter
+
+
+def resolve_list_file(cfg, split):
+    dataset_cfg = cfg.get("dataset", {})
+    list_file = dataset_cfg.get("list_file", "")
+    root = dataset_cfg.get("root", "")
+
+    if split == "train":
+        if list_file:
+            return os.path.join(os.path.dirname(list_file), "train.json")
+        return os.path.join(root, "train.json")
+
+    if split == "val":
+        if list_file:
+            return os.path.join(os.path.dirname(list_file), "val.json")
+        return os.path.join(root, "val.json")
+
+    if list_file and os.path.basename(list_file) == "test_label.json":
+        return list_file
+    if root and os.path.basename(root.rstrip("/\\")) == "test_set":
+        return os.path.join(os.path.dirname(root), "test_label.json")
+    return os.path.join(root, "test.json")
+
 
 def collate_fn(batch):
     batch = [b for b in batch if b is not None]
@@ -47,6 +71,7 @@ def main():
     parser.add_argument("--cfg", type=str, required=True, help="Path to config file")
     parser.add_argument("--ckpt", type=str, required=True, help="Path to checkpoint file")
     parser.add_argument("--out", type=str, default=None, help="Path to save output json")
+    parser.add_argument("--split", type=str, choices=["train", "val", "test"], default=None, help="Dataset split to run")
     parser.add_argument("--score_thr", type=float, default=0.5, help="Score threshold for decoding")
     parser.add_argument("--nms_thr", type=float, default=30.0, help="Lane NMS distance threshold in pixels; <= 0 disables NMS")
     parser.add_argument("--disable-polyfit", action="store_true", help="Disable polynomial smoothing in decoder")
@@ -57,20 +82,20 @@ def main():
         cfg = yaml.safe_load(f)
     default_out = os.path.join(cfg.get("paths", {}).get("output_root", "outputs"), "pred", "pred.json")
     out_path = args.out or default_out
-        
-    # Force remove list_file from config to allow split='val' to work
-    # if "dataset" in cfg and "list_file" in cfg["dataset"]:
-    #    del cfg["dataset"]["list_file"]
+
+    infer_cfg = copy.deepcopy(cfg)
+    split = args.split
+    if split is None:
+        split = "test" if os.path.basename(infer_cfg["dataset"].get("list_file", "")) == "test_label.json" else "val"
+    infer_cfg["dataset"]["list_file"] = resolve_list_file(cfg, split)
         
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Dataset
-    # Note: TuSimpleDataset(split='test') usually looks for test.json
-    # Ensure your config points to the correct root and list file if needed
-    dataset = TuSimpleDataset(cfg, split="val")
+    dataset = TuSimpleDataset(infer_cfg, split=split)
     
-    batch_size = cfg.get("test", {}).get("batch_size", 1)
+    batch_size = infer_cfg.get("test", {}).get("batch_size", 1)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -78,10 +103,12 @@ def main():
         num_workers=0,
         collate_fn=collate_fn
     )
-    print(f"Test dataset size: {len(dataset)}")
+    print(f"Running split: {split}")
+    print(f"List file: {infer_cfg['dataset']['list_file']}")
+    print(f"Dataset size: {len(dataset)}")
     
     # Model
-    model = LaneDetector(cfg)
+    model = LaneDetector(infer_cfg)
     model.to(device)
     
     # Load checkpoint
