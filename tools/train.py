@@ -137,7 +137,15 @@ def validate(model, loader, samples, cfg, device):
                 if gt is None:
                     continue
 
-                pred = converter.convert(lanes, raw_file, img_w, img_h, ori_w=1280, ori_h=720)
+                pred = converter.convert(
+                    lanes,
+                    raw_file,
+                    img_w,
+                    img_h,
+                    ori_w=1280,
+                    ori_h=720,
+                    target_h_samples=gt["h_samples"],
+                )
                 acc, fp, fn = LaneEval.bench(
                     pred["lanes"],
                     gt["lanes"],

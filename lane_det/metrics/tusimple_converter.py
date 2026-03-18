@@ -15,13 +15,14 @@ class TuSimpleConverter:
             self.target_h_samples = target_h_samples
 
     def convert(
-        self, 
-        lanes_list: List[Dict[str, Any]], 
-        raw_file: str, 
-        img_w: int, 
-        img_h: int, 
-        ori_w: int = 1280, 
-        ori_h: int = 720
+        self,
+        lanes_list: List[Dict[str, Any]],
+        raw_file: str,
+        img_w: int,
+        img_h: int,
+        ori_w: int = 1280,
+        ori_h: int = 720,
+        target_h_samples: List[int] = None,
     ) -> Dict[str, Any]:
         """
         Args:
@@ -35,6 +36,7 @@ class TuSimpleConverter:
             Dict matching TuSimple format line.
         """
         output_lanes = []
+        cur_h_samples = self.target_h_samples if target_h_samples is None else list(target_h_samples)
         
         scale_x = ori_w / img_w
         scale_y = ori_h / img_h
@@ -93,7 +95,7 @@ class TuSimpleConverter:
             y_min = ys_sorted.min()
             y_max = ys_sorted.max()
             
-            interp_xs = np.interp(self.target_h_samples, ys_sorted, xs_sorted, left=-2, right=-2)
+            interp_xs = np.interp(cur_h_samples, ys_sorted, xs_sorted, left=-2, right=-2)
             
             # Refine: if target_h is strictly outside [y_min, y_max], ensure it is -2.
             # (np.interp left/right handles strictly outside, but let's be explicit if needed)
@@ -120,7 +122,7 @@ class TuSimpleConverter:
         return {
             "raw_file": raw_file,
             "lanes": output_lanes,
-            "h_samples": self.target_h_samples,
+            "h_samples": cur_h_samples,
             "run_time": 0
         }
 

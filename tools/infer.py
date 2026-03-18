@@ -162,10 +162,13 @@ def main():
                 
                 # TuSimple format
                 res = converter.convert(
-                    lanes, 
-                    raw_file, 
-                    img_w, img_h,
-                    ori_w=1280, ori_h=720 # TuSimple original size
+                    lanes,
+                    raw_file,
+                    img_w,
+                    img_h,
+                    ori_w=1280,
+                    ori_h=720,
+                    target_h_samples=meta["h_samples"],
                 )
                 results.append(res)
                 
