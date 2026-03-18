@@ -1,7 +1,7 @@
 dataset:
   name: tusimple
-  root: /root/autodl-tmp/datasets/tusimple
-  list_file: /root/autodl-tmp/datasets/tusimple/train.json
+  root: /root/autodl-tmp/datasets/archive/TUSimple/train_set
+  list_file: /root/autodl-tmp/datasets/archive/TUSimple/train_set/train.json
   img_size: [1280, 720]
   y_samples: 56
   mean: [0.485, 0.456, 0.406]
