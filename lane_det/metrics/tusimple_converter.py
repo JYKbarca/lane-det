@@ -60,24 +60,8 @@ class TuSimpleConverter:
             ys_sorted = ys_ori[sort_idx]
             xs_sorted = xs_ori[sort_idx]
 
-            # --- PolyFit Refinement (Improved) ---
-            # Use weighted polynomial fitting to balance smoothness and adherence.
-            if len(ys_sorted) > 6:
-                try:
-                    # Weights: Trust bottom points (large y) more than top points (small y).
-                    # Top points often drift, so we give them low weight.
-                    weights = (ys_sorted / 720.0) ** 2
-                    
-                    # Fit 3rd degree polynomial: x = ay^3 + by^2 + cy + d
-                    # Degree 3 allows for changing curvature (e.g. entering a curve) better than degree 2.
-                    # The weights ensure the curve is anchored by the reliable bottom points.
-                    z = np.polyfit(ys_sorted, xs_sorted, 3, w=weights)
-                    p = np.poly1d(z)
-                    
-                    # Replace jagged xs with smooth xs
-                    xs_sorted = p(ys_sorted)
-                except:
-                    pass
+            # --- PolyFit Refinement Removed ---
+            # We rely on the decoder's polyfit (if enabled) to avoid double-reshaping the lanes.
             # --------------------------------
             
             # Interpolate to target h_samples
