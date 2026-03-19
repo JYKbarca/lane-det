@@ -384,16 +384,28 @@ def main():
             # Loss
             cls_loss = cls_criterion(cls_logits, cls_labels)
             reg1_loss = reg_criterion(reg_stage1, offset_labels, offset_masks)
-            reg2_loss = reg_criterion(reg_stage2, offset_labels, offset_masks)
-            reg_loss = reg_stage1_w * reg1_loss + reg_stage2_w * reg2_loss
+            
+            if use_refinement:
+                # Stage 2 learns to predict the residual (offset_labels - reg_stage1.detach())
+                # However, since reg2_loss is calculated on reg_stage2 (which is reg_stage1 + reg_delta_stage2),
+                # it's equivalent to penalizing the final prediction against the ground truth.
+                # We just need to make sure reg_stage2 is supervised correctly.
+                reg2_loss = reg_criterion(reg_stage2, offset_labels, offset_masks)
+                reg_loss = reg_stage1_w * reg1_loss + reg_stage2_w * reg2_loss
+            else:
+                reg2_loss = torch.tensor(0.0, device=device)
+                reg_loss = reg1_loss
             
             loss = cfg["loss"]["cls_weight"] * cls_loss + cfg["loss"]["reg_weight"] * reg_loss
             
             line_loss_val = 0.0
             if use_line_loss:
                 line1_loss = line_criterion(reg_stage1, offset_labels, offset_masks)
-                line2_loss = line_criterion(reg_stage2, offset_labels, offset_masks)
-                line_loss = reg_stage1_w * line1_loss + reg_stage2_w * line2_loss
+                if use_refinement:
+                    line2_loss = line_criterion(reg_stage2, offset_labels, offset_masks)
+                    line_loss = reg_stage1_w * line1_loss + reg_stage2_w * line2_loss
+                else:
+                    line_loss = line1_loss
                 loss += line_loss_weight * line_loss
                 line_loss_val = line_loss.item()
             

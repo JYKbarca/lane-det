@@ -77,8 +77,9 @@ class AnchorHead(nn.Module):
         )
 
         # Stage2 regression head (delta offsets).
+        # It takes the original features PLUS the stage1 predictions as input.
         self.reg_head_stage2 = LaneSequenceHead(
-            in_channels=in_channels,
+            in_channels=in_channels + 1,  # +1 for the stage1 prediction
             hidden_channels=reg_hidden_channels,
             num_layers=reg_seq_layers,
             kernel_size=reg_kernel_size,
@@ -136,7 +137,14 @@ class AnchorHead(nn.Module):
 
         # 4. Regression stage2 refinement
         if self.use_refinement:
-            reg_delta_stage2 = self.reg_head_stage2(seq_features).squeeze(1)
+            # Detach stage1 predictions so gradients from stage2 don't flow back into stage1
+            # We want stage1 to focus on coarse localization, and stage2 on residuals.
+            stage1_pred_detached = reg_stage1.detach().view(b * num_anchors, 1, num_y)
+            
+            # Concatenate features with stage1 predictions
+            seq_features_stage2 = torch.cat([seq_features, stage1_pred_detached], dim=1)
+            
+            reg_delta_stage2 = self.reg_head_stage2(seq_features_stage2).squeeze(1)
             reg_delta_stage2 = reg_delta_stage2.view(b, num_anchors, num_y)
             reg_final = reg_stage1 + reg_delta_stage2
         else:
