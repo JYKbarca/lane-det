@@ -36,7 +36,7 @@ class TuSimpleConverter:
             Dict matching TuSimple format line.
         """
         output_lanes = []
-        cur_h_samples = self.target_h_samples if target_h_samples is None else list(target_h_samples)
+        cur_h_samples = self.target_h_samples if target_h_samples is None else [int(y) for y in target_h_samples]
         
         scale_x = ori_w / img_w
         scale_y = ori_h / img_h
