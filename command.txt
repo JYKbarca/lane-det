@@ -38,3 +38,5 @@ python tools/visualize.py --cfg configs/tusimple_test.yaml --out outputs/visuali
 python tools/infer.py --cfg configs/tusimple_test.yaml --ckpt outputs/checkpoints/v2_match_loss/20260309_143913/last.pth --out pred_v1.json
 
 python tools/infer.py --cfg configs/tusimple_res18_fpn.yaml --ckpt /root/autodl-tmp/checkpoints/lane-det/20260319_133410/last.pth --out /root/autodl-tmp/outputs/lane-det/pred/pred_no_polyfit.json
+
+python tools/evaluate.py --pred /root/autodl-tmp/outputs/lane-det/pred/pred_no_polyfit.json --gt /root/autodl-tmp/datasets/archive/TUSimple/train_set/val.json

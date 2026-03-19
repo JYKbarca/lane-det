@@ -161,6 +161,9 @@ def main():
                 raw_file = meta["raw_file"]
                 
                 # TuSimple format
+                # We MUST use the original ground truth h_samples for evaluation, not the interpolated ones.
+                # If meta doesn't have the original, we fall back to the default TuSimple 48 points.
+                original_h_samples = meta.get("original_h_samples", None)
                 res = converter.convert(
                     lanes,
                     raw_file,
@@ -168,7 +171,7 @@ def main():
                     img_h,
                     ori_w=1280,
                     ori_h=720,
-                    target_h_samples=meta["h_samples"],
+                    target_h_samples=original_h_samples,
                 )
                 results.append(res)
                 

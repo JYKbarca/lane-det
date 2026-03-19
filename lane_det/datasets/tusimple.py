@@ -306,6 +306,7 @@ class TuSimpleDataset(Dataset):
                 "raw_file": item.get("raw_file", ""),
                 "img_path": img_path,
                 "h_samples": h_samples if h_samples is not None else [],
+                "original_h_samples": item.get("h_samples", []), # Keep original for evaluation
             },
         }
 
