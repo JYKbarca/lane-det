@@ -1,7 +1,8 @@
 .venv\Scripts\activate
 
+python tools/vis_dataset.py --cfg configs/tusimple_res18_fpn_matchv2.yaml --out /root/autodl-tmp/outputs/visualizations/m1_gt_only --max 10
 
-python tools/vis_dataset.py --cfg configs/tusimple_res18_fpn.yaml --out outputs/visualizations/m2_check --show_match --max 20
+python tools/vis_dataset.py --cfg configs/tusimple_res18_fpn_matchv2.yaml --out autodl-tmp/outputs/visualizations/gt_show --max 10
 
 
 python tools/train.py --cfg configs/tusimple_res18_fpn.yaml

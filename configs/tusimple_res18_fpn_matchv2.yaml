@@ -26,9 +26,6 @@ anchor:
   side_angle_min: 10.0
   num_y: 56
   # Line IoU based assignment
-  line_iou_pos_thr: 0.35
-  line_iou_pos_thr_bottom: 0.38
-  line_iou_pos_thr_side: 0.27
   line_iou_neg_thr: 0.10
   line_iou_width: 25.0
   line_iou_width_bottom: 25.0
@@ -64,10 +61,8 @@ model:
   reg_kernel_size: 3
 
 loss:
-  focal_alpha: 0.75   # Balanced positive sample weight
-  focal_gamma: 2.0
   smooth_l1_beta: 1.0
-  cls_weight: 10.0    # Increased classification weight
+  cls_weight: 20.0
   reg_weight: 2.0    # Higher regression weight to prioritize shape accuracy
   reg_loss_stage1_weight: 0.5
   reg_loss_stage2_weight: 1.0
@@ -97,10 +92,9 @@ eval:
   nms_bottom_dist_ratio: 1.0
   disable_polyfit: false
 
-# Step3: matching strategy skeleton (default keeps old behavior)
 match:
-  topk_per_gt: 1
-  min_force_pos_iou: 0.20
+  topk_per_gt: 2
+  min_force_pos_iou: 0.25
   use_soft_gating: true
   soft_common: false
   soft_top: true
@@ -108,8 +102,6 @@ match:
   penalty_common_ratio: 0.2
   penalty_top_err: 0.85
   penalty_angle: 0.7
-  pos_thr_bottom: 0.35
-  pos_thr_side: 0.25
   neg_thr: 0.10
 
 augmentation:

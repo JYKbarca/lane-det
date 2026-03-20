@@ -369,7 +369,7 @@ class TuSimpleDataset(Dataset):
                      "anchor_xs": anchors.anchor_xs,
                      "anchor_valid_mask": anchors.valid_mask,
                      "anchor_y_samples": anchors.y_samples,
-                     "cls_label": assigned.cls_label,
+                     "cls_target": assigned.cls_target,
                      "offset_label": assigned.offset_label,
                      "offset_valid_mask": final_offset_mask, # Use the corrected mask
                      "matched_gt_idx": assigned.matched_gt_idx,

@@ -142,13 +142,13 @@ def main():
 
         vis = draw_lane_points(img, sample["lanes"], sample["valid_mask"], ys, color=(0, 255, 0), radius=2)
 
-        cls_label = sample.get("cls_label", None)
+        cls_target = sample.get("cls_target", None)
         min_dist = sample.get("anchor_min_dist", None)
 
-        if cls_label is not None:
-            pos_idx = np.where(cls_label == 1)[0]
-            neg_idx = np.where(cls_label == 0)[0]
-            ign_idx = np.where(cls_label < 0)[0]
+        if cls_target is not None:
+            pos_idx = np.where(cls_target > 0)[0]
+            neg_idx = np.where(cls_target == 0)[0]
+            ign_idx = np.where(cls_target < 0)[0]
 
             total_pos += int(pos_idx.size)
             total_neg += int(neg_idx.size)

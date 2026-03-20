@@ -5,7 +5,7 @@ import numpy as np
 
 @dataclass
 class AssignedLabels:
-    cls_label: np.ndarray
+    cls_target: np.ndarray
     offset_label: np.ndarray
     valid_mask: np.ndarray
     matched_gt_idx: np.ndarray
@@ -18,7 +18,6 @@ class LabelAssigner:
 
     def __init__(
         self,
-        pos_thr: float,
         neg_thr: float,
         min_common_points: int = 6,
         min_common_ratio: float = 0.5,
@@ -28,8 +27,6 @@ class LabelAssigner:
         top_region_ratio: float = 0.4,
         top_max_mean_err: float = 20.0,
         top_min_points: int = 2,
-        pos_thr_bottom: float | None = None,
-        pos_thr_side: float | None = None,
         min_common_ratio_bottom: float | None = None,
         min_common_ratio_side: float | None = None,
         top_max_mean_err_bottom: float | None = None,
@@ -50,9 +47,6 @@ class LabelAssigner:
         penalty_top_err: float = 1.0,
         penalty_angle: float = 1.0,
     ):
-        if neg_thr > pos_thr:
-            raise ValueError("For Line IoU, neg_thr must be <= pos_thr")
-        self.pos_thr = float(pos_thr)
         self.neg_thr = float(neg_thr)
         self.min_common_points = int(min_common_points)
         self.min_common_ratio = float(min_common_ratio)
@@ -62,8 +56,6 @@ class LabelAssigner:
         self.top_region_ratio = float(top_region_ratio)
         self.top_max_mean_err = float(top_max_mean_err)
         self.top_min_points = int(top_min_points)
-        self.pos_thr_bottom = float(pos_thr if pos_thr_bottom is None else pos_thr_bottom)
-        self.pos_thr_side = float(pos_thr if pos_thr_side is None else pos_thr_side)
         self.min_common_ratio_bottom = float(min_common_ratio if min_common_ratio_bottom is None else min_common_ratio_bottom)
         self.min_common_ratio_side = float(min_common_ratio if min_common_ratio_side is None else min_common_ratio_side)
         self.top_max_mean_err_bottom = float(top_max_mean_err if top_max_mean_err_bottom is None else top_max_mean_err_bottom)
@@ -93,7 +85,6 @@ class LabelAssigner:
         mcfg = cfg.get("match", {})
         global_soft = bool(mcfg.get("use_soft_gating", False))
         return cls(
-            pos_thr=float(acfg.get("line_iou_pos_thr", 0.55)),
             neg_thr=float(mcfg.get("neg_thr", acfg.get("line_iou_neg_thr", 0.35))),
             min_common_points=int(acfg.get("min_common_points", 6)),
             min_common_ratio=float(acfg.get("min_common_ratio", 0.5)),
@@ -103,8 +94,6 @@ class LabelAssigner:
             top_region_ratio=float(acfg.get("top_region_ratio", 0.4)),
             top_max_mean_err=float(acfg.get("top_max_mean_err", 20.0)),
             top_min_points=int(acfg.get("top_min_points", 2)),
-            pos_thr_bottom=mcfg.get("pos_thr_bottom", acfg.get("line_iou_pos_thr_bottom", None)),
-            pos_thr_side=mcfg.get("pos_thr_side", acfg.get("line_iou_pos_thr_side", None)),
             min_common_ratio_bottom=acfg.get("min_common_ratio_bottom", None),
             min_common_ratio_side=acfg.get("min_common_ratio_side", None),
             top_max_mean_err_bottom=acfg.get("top_max_mean_err_bottom", None),
@@ -150,7 +139,7 @@ class LabelAssigner:
         iou[valid] = inter_sum[valid] / union_sum[valid]
         return iou
 
-    def _build_match_stats(self, num_gt, iou_mat, best_iou, cls_label, reason_masks):
+    def _build_match_stats(self, num_gt, iou_mat, best_iou, cls_target, reason_masks):
         if num_gt <= 0:
             return {
                 "per_gt_max_iou": [],
@@ -161,7 +150,7 @@ class LabelAssigner:
                     "angle_fail": 0,
                     "x_bottom_fail": 0,
                     "threshold_gray": 0,
-                    "other": int((cls_label < 0).sum()),
+                    "other": int((cls_target < 0).sum()),
                 },
             }
 
@@ -169,13 +158,13 @@ class LabelAssigner:
         per_gt_max_iou = np.where(per_gt_max_iou >= 0, per_gt_max_iou, 0.0).astype(np.float32)
         per_gt_pos_count = np.zeros((num_gt,), dtype=np.int64)
 
-        pos_ids = np.where(cls_label == 1)[0]
+        pos_ids = np.where(cls_target > 0)[0]
         for a in pos_ids:
             g = int(np.argmax(iou_mat[a]))
             if g >= 0:
                 per_gt_pos_count[g] += 1
 
-        ignore_ids = np.where(cls_label < 0)[0]
+        ignore_ids = np.where(cls_target < 0)[0]
         common_fail = 0
         top_fail = 0
         angle_fail = 0
@@ -215,16 +204,16 @@ class LabelAssigner:
         anchor_valid_mask = np.asarray(anchor_valid_mask, dtype=np.uint8)
 
         num_anchors, num_y = anchor_xs.shape
-        cls_label = np.full((num_anchors,), -1, dtype=np.int64)
+        cls_target = np.full((num_anchors,), -1.0, dtype=np.float32)
         offset_label = np.zeros((num_anchors, num_y), dtype=np.float32)
         valid_mask = np.zeros((num_anchors, num_y), dtype=np.uint8)
         matched_gt_idx = np.full((num_anchors,), -1, dtype=np.int64)
         min_dist = np.full((num_anchors,), np.inf, dtype=np.float32)
 
         if gt_lanes is None or gt_valid_mask is None:
-            cls_label[:] = 0
+            cls_target[:] = 0
             return AssignedLabels(
-                cls_label,
+                cls_target,
                 offset_label,
                 valid_mask,
                 matched_gt_idx,
@@ -233,7 +222,7 @@ class LabelAssigner:
                     0,
                     np.zeros((num_anchors, 0), dtype=np.float32),
                     np.full((num_anchors,), -1.0, dtype=np.float32),
-                    cls_label,
+                    cls_target,
                     {
                         "all_common_fail": np.zeros((num_anchors,), dtype=bool),
                         "top_fail_any": np.zeros((num_anchors,), dtype=bool),
@@ -247,9 +236,9 @@ class LabelAssigner:
         gt_valid_mask = np.asarray(gt_valid_mask, dtype=np.uint8)
 
         if gt_lanes.size == 0:
-            cls_label[:] = 0
+            cls_target[:] = 0
             return AssignedLabels(
-                cls_label,
+                cls_target,
                 offset_label,
                 valid_mask,
                 matched_gt_idx,
@@ -258,7 +247,7 @@ class LabelAssigner:
                     0,
                     np.zeros((num_anchors, 0), dtype=np.float32),
                     np.full((num_anchors,), -1.0, dtype=np.float32),
-                    cls_label,
+                    cls_target,
                     {
                         "all_common_fail": np.zeros((num_anchors,), dtype=bool),
                         "top_fail_any": np.zeros((num_anchors,), dtype=bool),
@@ -396,15 +385,9 @@ class LabelAssigner:
         # Use (1 - IoU), invalid pairs stay +inf.
         valid_best = best_iou >= 0
         min_dist[valid_best] = 1.0 - best_iou[valid_best]
-        is_side_anchor = anchor_valid_mask[:, -1] == 0
-        pos_thr_per_anchor = np.where(is_side_anchor, self.pos_thr_side, self.pos_thr_bottom)
-        pos = best_iou >= pos_thr_per_anchor
-        neg = (best_iou >= 0) & (best_iou <= self.neg_thr)
 
-        # Step4: Dynamic Top-K force positive per GT (no fallback).
-        # For each GT, select top-k anchors by IoU; if IoU >= min_force_pos_iou,
-        # mark those anchors as positive even if they were in gray zone/negative.
-        # If one anchor is selected by multiple GT lanes, keep the GT with highest IoU.
+        # Positive anchors are defined only by top-k quality matches per GT.
+        # All other valid anchors become negatives instead of additional positives.
         force_pos = np.zeros((num_anchors,), dtype=bool)
         force_gt_idx = np.full((num_anchors,), -1, dtype=np.int64)
         if self.topk_per_gt > 0 and num_gt > 0:
@@ -421,15 +404,16 @@ class LabelAssigner:
                         force_pos[a] = True
                         force_gt_idx[a] = g
 
-        if np.any(force_pos):
-            pos[force_pos] = True
+        pos = force_pos
+        neg = (best_iou >= 0) & (~pos)
 
-        cls_label[neg] = 0
-        cls_label[pos] = 1
-        matched_gt_idx[pos] = best_gt[pos]
+        cls_target[neg] = 0.0
         matched_gt_idx[force_pos] = force_gt_idx[force_pos]
-
         pos_ids = np.where(pos)[0]
+        for a in pos_ids:
+            g = matched_gt_idx[a]
+            cls_target[a] = max(float(iou_mat[a, g]), 0.0)
+
         for a in pos_ids:
             g = matched_gt_idx[a]
             common = (anchor_valid_mask[a] > 0) & (gt_valid_mask[g] > 0)
@@ -444,6 +428,6 @@ class LabelAssigner:
             "angle_fail_any": np.any(angle_fail_mat, axis=1),
             "xbottom_fail_any": np.any(xbottom_fail_mat, axis=1),
         }
-        match_stats = self._build_match_stats(num_gt, iou_mat, best_iou, cls_label, reason_masks)
+        match_stats = self._build_match_stats(num_gt, iou_mat, best_iou, cls_target, reason_masks)
 
-        return AssignedLabels(cls_label, offset_label, valid_mask, matched_gt_idx, min_dist, match_stats=match_stats)
+        return AssignedLabels(cls_target, offset_label, valid_mask, matched_gt_idx, min_dist, match_stats=match_stats)

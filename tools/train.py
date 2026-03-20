@@ -17,7 +17,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from lane_det.datasets.tusimple import TuSimpleDataset
 from lane_det.models import LaneDetector
-from lane_det.losses import FocalLoss, RegLoss, SoftLineOverlapLoss
+from lane_det.losses import QualityBCELoss, RegLoss, SoftLineOverlapLoss
 from lane_det.anchors import AnchorSet
 from lane_det.postprocess import LaneDecoder
 from lane_det.metrics import TuSimpleConverter
@@ -65,8 +65,8 @@ def collate_fn(batch):
     images = torch.stack(images)
     
     # Stack labels
-    # cls_label: [B, Num_Anchors]
-    cls_labels = torch.stack([torch.from_numpy(b["cls_label"]).float() for b in batch])
+    # cls_target: [B, Num_Anchors]
+    cls_targets = torch.stack([torch.from_numpy(b["cls_target"]).float() for b in batch])
     
     # offset_label: [B, Num_Anchors, Num_Y]
     offset_labels = torch.stack([torch.from_numpy(b["offset_label"]).float() for b in batch])
@@ -86,7 +86,7 @@ def collate_fn(batch):
     
     return {
         "images": images,
-        "cls_labels": cls_labels,
+        "cls_targets": cls_targets,
         "offset_labels": offset_labels,
         "offset_masks": offset_masks,
         "anchors": anchors,
@@ -204,12 +204,12 @@ def log_pretrain_match_stats(dataset, logger, max_samples=200):
 
     for i in range(max_n):
         sample = dataset[i]
-        cls_label = sample.get("cls_label", None)
-        if cls_label is None:
+        cls_target = sample.get("cls_target", None)
+        if cls_target is None:
             continue
-        total_pos += int((cls_label == 1).sum())
-        total_neg += int((cls_label == 0).sum())
-        total_ignore += int((cls_label < 0).sum())
+        total_pos += int((cls_target > 0).sum())
+        total_neg += int((cls_target == 0).sum())
+        total_ignore += int((cls_target < 0).sum())
 
         match_stats = sample.get("match_stats", None)
         if match_stats is None:
@@ -309,10 +309,7 @@ def main():
     accumulation_steps = 2
     
     # Losses
-    cls_criterion = FocalLoss(
-        alpha=cfg["loss"]["focal_alpha"],
-        gamma=cfg["loss"]["focal_gamma"]
-    )
+    cls_criterion = QualityBCELoss()
     reg_criterion = RegLoss()
     reg_stage1_w = float(cfg.get("loss", {}).get("reg_loss_stage1_weight", 0.5))
     reg_stage2_w = float(cfg.get("loss", {}).get("reg_loss_stage2_weight", 1.0))
@@ -370,7 +367,7 @@ def main():
                 continue
                 
             images = batch["images"].to(device)
-            cls_labels = batch["cls_labels"].to(device)
+            cls_targets = batch["cls_targets"].to(device)
             offset_labels = batch["offset_labels"].to(device)
             offset_masks = batch["offset_masks"].to(device)
             anchors = batch["anchors"] 
@@ -386,7 +383,7 @@ def main():
                 reg_stage2 = reg_preds
             
             # Loss
-            cls_loss = cls_criterion(cls_logits, cls_labels)
+            cls_loss = cls_criterion(cls_logits, cls_targets)
             reg1_loss = reg_criterion(reg_stage1, offset_labels, offset_masks)
             
             if use_refinement:
