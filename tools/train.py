@@ -109,6 +109,10 @@ def validate(model, loader, samples, cfg, device):
         score_thr=float(eval_cfg.get("score_thr", 0.5)),
         nms_thr=float(eval_cfg.get("nms_thr", 30.0)),
         use_polyfit=not bool(eval_cfg.get("disable_polyfit", False)),
+        nms_min_common_points=int(eval_cfg.get("nms_min_common_points", 8)),
+        nms_overlap_ratio_thr=float(eval_cfg.get("nms_overlap_ratio_thr", 0.6)),
+        nms_top_dist_ratio=float(eval_cfg.get("nms_top_dist_ratio", 1.25)),
+        nms_bottom_dist_ratio=float(eval_cfg.get("nms_bottom_dist_ratio", 1.0)),
     )
     converter = TuSimpleConverter()
     gt_map = {item["raw_file"]: item for item in samples}

@@ -38,12 +38,17 @@ class FocalLoss(nn.Module):
         focal_loss = alpha_t * (1 - pt) ** self.gamma * bce_loss
         
         if self.reduction == 'mean':
-            # Normalize by number of positive samples to avoid loss dilution
-            num_pos = (targets == 1).sum()
-            if num_pos > 0:
-                return focal_loss.sum() / num_pos
-            else:
-                return focal_loss.sum() # Fallback if no positive samples
+            # Normalize positive and negative samples separately to balance gradients
+            pos_mask = (targets == 1)
+            neg_mask = (targets == 0)
+            
+            num_pos = pos_mask.sum().clamp(min=1.0)
+            num_neg = neg_mask.sum().clamp(min=1.0)
+            
+            loss_pos = focal_loss[pos_mask].sum() / num_pos
+            loss_neg = focal_loss[neg_mask].sum() / num_neg
+            
+            return loss_pos + loss_neg
         elif self.reduction == 'sum':
             return focal_loss.sum()
         else:

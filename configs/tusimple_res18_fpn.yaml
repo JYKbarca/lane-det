@@ -61,7 +61,7 @@ loss:
   focal_alpha: 0.75
   focal_gamma: 2.0
   smooth_l1_beta: 1.0
-  cls_weight: 1.0
+  cls_weight: 10.0
   reg_weight: 1.0
   
   # Soft Line Overlap Loss settings

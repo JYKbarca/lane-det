@@ -74,6 +74,10 @@ def main():
     parser.add_argument("--split", type=str, choices=["train", "val", "test"], default=None, help="Dataset split to run")
     parser.add_argument("--score_thr", type=float, default=0.5, help="Score threshold for decoding")
     parser.add_argument("--nms_thr", type=float, default=30.0, help="Lane NMS distance threshold in pixels; <= 0 disables NMS")
+    parser.add_argument("--nms_min_common_points", type=int, default=8, help="Minimum shared valid points required before duplicate check")
+    parser.add_argument("--nms_overlap_ratio_thr", type=float, default=0.6, help="Minimum overlap ratio required before duplicate check")
+    parser.add_argument("--nms_top_dist_ratio", type=float, default=1.25, help="Top-segment distance threshold ratio relative to nms_thr")
+    parser.add_argument("--nms_bottom_dist_ratio", type=float, default=1.0, help="Bottom-segment distance threshold ratio relative to nms_thr")
     parser.add_argument("--disable-polyfit", action="store_true", help="Disable polynomial smoothing in decoder")
     args = parser.parse_args()
     
@@ -125,6 +129,10 @@ def main():
         score_thr=args.score_thr,
         nms_thr=args.nms_thr,
         use_polyfit=not args.disable_polyfit,
+        nms_min_common_points=args.nms_min_common_points,
+        nms_overlap_ratio_thr=args.nms_overlap_ratio_thr,
+        nms_top_dist_ratio=args.nms_top_dist_ratio,
+        nms_bottom_dist_ratio=args.nms_bottom_dist_ratio,
     )
     converter = TuSimpleConverter() # Default h_samples
     
@@ -160,9 +168,7 @@ def main():
                 meta = metas[i]
                 raw_file = meta["raw_file"]
                 
-                # TuSimple format
-                # We MUST use the original ground truth h_samples for evaluation, not the interpolated ones.
-                # If meta doesn't have the original, we fall back to the default TuSimple 48 points.
+                # TuSimple format: use the original annotation h_samples for export.
                 original_h_samples = meta.get("original_h_samples", None)
                 res = converter.convert(
                     lanes,

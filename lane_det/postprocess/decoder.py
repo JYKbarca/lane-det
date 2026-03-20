@@ -12,18 +12,18 @@ class LaneDecoder:
         score_thr: float = 0.5,
         nms_thr: float = 45.0,
         use_polyfit: bool = True,
+        nms_min_common_points: int = 8,
+        nms_overlap_ratio_thr: float = 0.6,
+        nms_top_dist_ratio: float = 1.25,
+        nms_bottom_dist_ratio: float = 1.0,
     ):
         self.score_thr = score_thr
-        self.nms_thr = nms_thr # Distance threshold for NMS (pixels)
+        self.nms_thr = nms_thr
         self.use_polyfit = bool(use_polyfit)
-        
-        # We will use nms_thr to dynamically control the distance thresholds
-        self.nms_min_common_points = 8
-        self.nms_overlap_ratio_thr = 0.6
-        # These will be dynamically set based on self.nms_thr in _is_duplicate_lane
-        # self.nms_mean_dist_thr = 20.0
-        # self.nms_top_dist_thr = 25.0
-        # self.nms_bottom_dist_thr = 20.0
+        self.nms_min_common_points = int(nms_min_common_points)
+        self.nms_overlap_ratio_thr = float(nms_overlap_ratio_thr)
+        self.nms_top_dist_ratio = float(nms_top_dist_ratio)
+        self.nms_bottom_dist_ratio = float(nms_bottom_dist_ratio)
 
     def _is_duplicate_lane(self, lane_a: Dict[str, Any], lane_b: Dict[str, Any]) -> bool:
         common_mask = (lane_a['valid_mask'] > 0) & (lane_b['valid_mask'] > 0)
@@ -42,7 +42,6 @@ class LaneDecoder:
         diffs = np.abs(lane_a['x_list'][common_idx] - lane_b['x_list'][common_idx])
         mean_dist = float(diffs.mean())
         
-        # Use the dynamically passed nms_thr as the primary distance threshold
         if mean_dist >= self.nms_thr:
             return False
 
@@ -50,10 +49,8 @@ class LaneDecoder:
         top_dist = float(diffs[:seg_len].mean())
         bottom_dist = float(diffs[-seg_len:].mean())
 
-        # Scale top and bottom thresholds relative to the main nms_thr
-        # Previously: mean=20, top=25 (1.25x), bottom=20 (1.0x)
-        top_dist_thr = self.nms_thr * 1.25
-        bottom_dist_thr = self.nms_thr * 1.0
+        top_dist_thr = self.nms_thr * self.nms_top_dist_ratio
+        bottom_dist_thr = self.nms_thr * self.nms_bottom_dist_ratio
 
         return top_dist < top_dist_thr and bottom_dist < bottom_dist_thr
 
