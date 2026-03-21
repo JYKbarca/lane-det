@@ -373,6 +373,8 @@ class TuSimpleDataset(Dataset):
                      "offset_label": assigned.offset_label,
                      "offset_valid_mask": final_offset_mask, # Use the corrected mask
                      "matched_gt_idx": assigned.matched_gt_idx,
+                     "best_gt_idx": assigned.best_gt_idx,
+                     "best_iou": assigned.best_iou,
                      "anchor_min_dist": assigned.min_dist,
                      "match_stats": assigned.match_stats,
                  }

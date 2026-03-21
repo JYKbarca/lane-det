@@ -9,6 +9,8 @@ class AssignedLabels:
     offset_label: np.ndarray
     valid_mask: np.ndarray
     matched_gt_idx: np.ndarray
+    best_gt_idx: np.ndarray
+    best_iou: np.ndarray
     min_dist: np.ndarray
     match_stats: dict | None = None
 
@@ -229,6 +231,8 @@ class LabelAssigner:
                 offset_label,
                 valid_mask,
                 matched_gt_idx,
+                np.full((num_anchors,), -1, dtype=np.int64),
+                np.full((num_anchors,), -1.0, dtype=np.float32),
                 min_dist,
                 match_stats=self._build_match_stats(
                     0,
@@ -254,6 +258,8 @@ class LabelAssigner:
                 offset_label,
                 valid_mask,
                 matched_gt_idx,
+                np.full((num_anchors,), -1, dtype=np.int64),
+                np.full((num_anchors,), -1.0, dtype=np.float32),
                 min_dist,
                 match_stats=self._build_match_stats(
                     0,
@@ -392,6 +398,8 @@ class LabelAssigner:
 
         best_gt = np.argmax(iou_mat, axis=1)
         best_iou = iou_mat[np.arange(num_anchors), best_gt]
+        invalid_best = best_iou < 0
+        best_gt[invalid_best] = -1
 
         # Keep historical field semantics for downstream visualization: lower is better.
         # Use (1 - IoU), invalid pairs stay +inf.
@@ -442,4 +450,13 @@ class LabelAssigner:
         }
         match_stats = self._build_match_stats(num_gt, iou_mat, best_iou, cls_target, reason_masks)
 
-        return AssignedLabels(cls_target, offset_label, valid_mask, matched_gt_idx, min_dist, match_stats=match_stats)
+        return AssignedLabels(
+            cls_target,
+            offset_label,
+            valid_mask,
+            matched_gt_idx,
+            best_gt.astype(np.int64),
+            best_iou.astype(np.float32),
+            min_dist,
+            match_stats=match_stats,
+        )

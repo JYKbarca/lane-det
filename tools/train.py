@@ -73,6 +73,9 @@ def collate_fn(batch):
     
     # offset_valid_mask: [B, Num_Anchors, Num_Y]
     offset_masks = torch.stack([torch.from_numpy(b["offset_valid_mask"]).float() for b in batch])
+    matched_gt_idx = torch.stack([torch.from_numpy(b["matched_gt_idx"]).long() for b in batch])
+    best_gt_idx = torch.stack([torch.from_numpy(b["best_gt_idx"]).long() for b in batch])
+    best_ious = torch.stack([torch.from_numpy(b["best_iou"]).float() for b in batch])
     
     # We need to reconstruct AnchorSet for the batch
     first_sample = batch[0]
@@ -89,6 +92,9 @@ def collate_fn(batch):
         "cls_targets": cls_targets,
         "offset_labels": offset_labels,
         "offset_masks": offset_masks,
+        "matched_gt_idx": matched_gt_idx,
+        "best_gt_idx": best_gt_idx,
+        "best_ious": best_ious,
         "anchors": anchors,
         "metas": [b.get("meta", {}) for b in batch],
     }
@@ -181,6 +187,103 @@ def summarize_distribution(values):
         f"p90={np.percentile(arr, 90):.4f}, "
         f"min={arr.min():.4f}, max={arr.max():.4f}"
     )
+
+
+def compute_local_rank_loss(
+    cls_logits,
+    cls_targets,
+    matched_gt_idx,
+    best_gt_idx,
+    best_ious,
+    margin=0.2,
+    hard_neg_topk=2,
+    hard_neg_iou_min=0.2,
+):
+    batch_losses = []
+    batch_size = cls_logits.shape[0]
+
+    for b in range(batch_size):
+        logits_b = cls_logits[b]
+        targets_b = cls_targets[b]
+        pos_gt_b = matched_gt_idx[b]
+        best_gt_b = best_gt_idx[b]
+        best_iou_b = best_ious[b]
+
+        pos_mask = targets_b > 0
+        if not pos_mask.any():
+            continue
+
+        pos_gt_ids = torch.unique(pos_gt_b[pos_mask])
+        pos_gt_ids = pos_gt_ids[pos_gt_ids >= 0]
+        for gt_id in pos_gt_ids:
+            gt_pos_mask = pos_mask & (pos_gt_b == gt_id)
+            gt_pos_ids = torch.nonzero(gt_pos_mask, as_tuple=True)[0]
+            if gt_pos_ids.numel() == 0:
+                continue
+
+            gt_pos_scores = targets_b[gt_pos_ids]
+            primary_pos_id = gt_pos_ids[torch.argmax(gt_pos_scores)]
+            pos_logit = logits_b[primary_pos_id]
+
+            neg_mask = (
+                (targets_b == 0)
+                & (best_gt_b == gt_id)
+                & (best_iou_b >= hard_neg_iou_min)
+            )
+            neg_ids = torch.nonzero(neg_mask, as_tuple=True)[0]
+            if neg_ids.numel() == 0:
+                continue
+
+            neg_iou = best_iou_b[neg_ids]
+            topk = min(int(hard_neg_topk), int(neg_ids.numel()))
+            hard_order = torch.argsort(neg_iou, descending=True)[:topk]
+            hard_neg_ids = neg_ids[hard_order]
+            neg_logits = logits_b[hard_neg_ids]
+
+            rank_terms = torch.relu(margin - (pos_logit - neg_logits))
+            if rank_terms.numel() > 0:
+                batch_losses.append(rank_terms.mean())
+
+    if not batch_losses:
+        return cls_logits.sum() * 0.0
+
+    return torch.stack(batch_losses).mean()
+
+
+def build_optimizer(model, cfg):
+    lr = float(cfg["train"]["lr"])
+    weight_decay = float(cfg["train"]["weight_decay"])
+
+    decay_params = []
+    no_decay_params = []
+    norm_types = (
+        torch.nn.BatchNorm1d,
+        torch.nn.BatchNorm2d,
+        torch.nn.BatchNorm3d,
+        torch.nn.SyncBatchNorm,
+        torch.nn.GroupNorm,
+        torch.nn.LayerNorm,
+        torch.nn.InstanceNorm1d,
+        torch.nn.InstanceNorm2d,
+        torch.nn.InstanceNorm3d,
+    )
+
+    for module in model.modules():
+        for name, param in module.named_parameters(recurse=False):
+            if not param.requires_grad:
+                continue
+            if name.endswith("bias") or isinstance(module, norm_types):
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+
+    param_groups = []
+    if decay_params:
+        param_groups.append({"params": decay_params, "weight_decay": weight_decay})
+    if no_decay_params:
+        param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
+
+    return optim.AdamW(param_groups, lr=lr)
 
 
 def log_pretrain_match_stats(dataset, logger, max_samples=200):
@@ -294,11 +397,7 @@ def main():
     model.to(device)
     
     # Optimizer
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=cfg["train"]["lr"],
-        weight_decay=cfg["train"]["weight_decay"]
-    )
+    optimizer = build_optimizer(model, cfg)
     
     # Learning Rate Scheduler
     lr_milestones = cfg["train"].get("lr_milestones", [12, 18])
@@ -321,6 +420,10 @@ def main():
     line_sigma_refined = float(cfg.get("loss", {}).get("line_sigma_refined", line_sigma))
     line_sigma_step = int(cfg.get("loss", {}).get("line_sigma_step", 12))
     line_min_points = int(cfg.get("loss", {}).get("line_min_valid_points", 3))
+    rank_weight = float(cfg.get("loss", {}).get("rank_weight", 1.0))
+    rank_margin = float(cfg.get("loss", {}).get("rank_margin", 0.2))
+    hard_neg_topk = int(cfg.get("loss", {}).get("hard_neg_topk", 2))
+    hard_neg_iou_min = float(cfg.get("loss", {}).get("hard_neg_iou_min", 0.2))
     if use_line_loss:
         line_criterion = SoftLineOverlapLoss(sigma=line_sigma, min_valid_points=line_min_points)
     
@@ -357,6 +460,7 @@ def main():
         epoch_reg1_loss = 0.0
         epoch_reg2_loss = 0.0
         epoch_line_loss = 0.0
+        epoch_rank_loss = 0.0
         
         optimizer.zero_grad()
         
@@ -370,6 +474,9 @@ def main():
             cls_targets = batch["cls_targets"].to(device)
             offset_labels = batch["offset_labels"].to(device)
             offset_masks = batch["offset_masks"].to(device)
+            matched_gt_idx = batch["matched_gt_idx"].to(device)
+            best_gt_idx = batch["best_gt_idx"].to(device)
+            best_ious = batch["best_ious"].to(device)
             anchors = batch["anchors"] 
             
             # Forward
@@ -384,6 +491,16 @@ def main():
             
             # Loss
             cls_loss = cls_criterion(cls_logits, cls_targets)
+            rank_loss = compute_local_rank_loss(
+                cls_logits,
+                cls_targets,
+                matched_gt_idx,
+                best_gt_idx,
+                best_ious,
+                margin=rank_margin,
+                hard_neg_topk=hard_neg_topk,
+                hard_neg_iou_min=hard_neg_iou_min,
+            )
             reg1_loss = reg_criterion(reg_stage1, offset_labels, offset_masks)
             
             if use_refinement:
@@ -397,7 +514,11 @@ def main():
                 reg2_loss = torch.tensor(0.0, device=device)
                 reg_loss = reg1_loss
             
-            loss = cfg["loss"]["cls_weight"] * cls_loss + cfg["loss"]["reg_weight"] * reg_loss
+            loss = (
+                cfg["loss"]["cls_weight"] * cls_loss
+                + rank_weight * rank_loss
+                + cfg["loss"]["reg_weight"] * reg_loss
+            )
             
             line_loss_val = 0.0
             if use_line_loss:
@@ -421,6 +542,7 @@ def main():
             epoch_reg_loss += reg_loss.item()
             epoch_reg1_loss += reg1_loss.item()
             epoch_reg2_loss += reg2_loss.item()
+            epoch_rank_loss += rank_loss.item()
             if use_line_loss:
                 epoch_line_loss += line_loss_val
             
@@ -428,7 +550,7 @@ def main():
                 msg = (
                     f"Epoch [{epoch+1}/{num_epochs}], Step [{i}/{len(train_loader)}], "
                     f"Loss: {loss.item():.4f} "
-                    f"(Cls: {cls_loss.item():.4f}, Reg: {reg_loss.item():.4f}, "
+                    f"(Cls: {cls_loss.item():.4f}, Rank: {rank_loss.item():.4f}, Reg: {reg_loss.item():.4f}, "
                     f"Reg1: {reg1_loss.item():.4f}, Reg2: {reg2_loss.item():.4f})"
                 )
                 if use_line_loss:
@@ -443,12 +565,13 @@ def main():
         avg_reg = epoch_reg_loss / len(train_loader)
         avg_reg1 = epoch_reg1_loss / len(train_loader)
         avg_reg2 = epoch_reg2_loss / len(train_loader)
+        avg_rank = epoch_rank_loss / len(train_loader)
         avg_line = epoch_line_loss / len(train_loader) if use_line_loss else 0.0
         
         msg = (
             f"Epoch [{epoch+1}/{num_epochs}] Finished. Time: {epoch_time:.2f}s. "
             f"Avg Loss: {avg_loss:.4f} "
-            f"(Cls: {avg_cls:.4f}, Reg: {avg_reg:.4f}, Reg1: {avg_reg1:.4f}, Reg2: {avg_reg2:.4f})"
+            f"(Cls: {avg_cls:.4f}, Rank: {avg_rank:.4f}, Reg: {avg_reg:.4f}, Reg1: {avg_reg1:.4f}, Reg2: {avg_reg2:.4f})"
         )
         if use_line_loss:
             msg += f", Line: {avg_line:.4f}"
