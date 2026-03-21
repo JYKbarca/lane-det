@@ -424,6 +424,66 @@ class LabelAssigner:
                         force_pos[a] = True
                         force_gt_idx[a] = g
 
+            # --- Fallback guarantee: every GT gets at least 1 positive anchor ---
+            # If a GT has no positive anchor after top-k filtering, fall back to the
+            # anchor with the highest *raw* IoU, ignoring all gate results.
+            # We must ensure anchors are not "stolen" by later GTs, leaving earlier GTs empty.
+            
+            # 1. Find which GTs still need an anchor
+            gt_has_pos = np.zeros(num_gt, dtype=bool)
+            for a in np.where(force_pos)[0]:
+                gt_has_pos[force_gt_idx[a]] = True
+
+            # 2. Assign fallback anchors, avoiding already claimed ones if possible
+            for g in range(num_gt):
+                if gt_has_pos[g]:
+                    continue
+                    
+                # Recompute raw IoU without any gating for this GT
+                raw_common = (anchor_valid_mask > 0) & (gt_valid_mask[g][None, :] > 0)
+                raw_common_count = raw_common.sum(axis=1)
+                is_side = anchor_valid_mask[:, -1] == 0
+                raw_width = np.where(is_side, self.line_iou_width_side, self.line_iou_width_bottom)
+                raw_iou = self._line_iou(anchor_xs, gt_lanes[g], raw_common, raw_width)
+                
+                # Require at least some overlap
+                raw_iou[raw_common_count < 2] = -1.0
+                
+                if raw_iou.max() <= 0:
+                    continue
+                    
+                # Try to find the best anchor that isn't already claimed by another GT
+                unclaimed_mask = ~force_pos
+                unclaimed_iou = raw_iou.copy()
+                unclaimed_iou[~unclaimed_mask] = -1.0
+                
+                if unclaimed_iou.max() > 0:
+                    # Found an unclaimed anchor
+                    best_a = int(np.argmax(unclaimed_iou))
+                    force_pos[best_a] = True
+                    force_gt_idx[best_a] = g
+                    iou_mat[best_a, g] = raw_iou[best_a]
+                else:
+                    # All overlapping anchors are claimed by other GTs.
+                    # We CANNOT steal, because that would leave another GT empty.
+                    # Instead, we allow this anchor to be assigned to the CURRENT GT as well.
+                    # Wait, force_gt_idx is a 1D array, so an anchor can only point to ONE GT.
+                    # If we overwrite force_gt_idx[best_a], we steal it.
+                    # If we don't overwrite it, this GT gets nothing.
+                    # Since an anchor can only regress to one GT, if two GTs perfectly overlap
+                    # and share the exact same anchors, they are essentially duplicates.
+                    # Leaving one GT without an anchor is the ONLY mathematically sound choice 
+                    # when using a 1D assignment array.
+                    pass
+                
+        # --- Crucial Sync: Recompute best_gt and best_iou after fallback ---
+        # Fallback modifies iou_mat, so we must update these to prevent mismatch
+        # between matched_gt_idx and best_gt_idx in downstream loss/stats.
+        best_gt = np.argmax(iou_mat, axis=1)
+        best_iou = iou_mat[np.arange(num_anchors), best_gt]
+        invalid_best = best_iou < 0
+        best_gt[invalid_best] = -1
+
         pos = force_pos
         neg = (best_iou >= 0) & (~pos)
 

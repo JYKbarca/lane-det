@@ -63,46 +63,6 @@ class TuSimpleDataset(Dataset):
         extended_mask = valid_mask.copy()
         
         h_samples = np.asarray(h_samples, dtype=np.float32)
-        y_bottom = h_samples[-1] # Usually 710 or 720
-        
-        for i in range(num_gt):
-            valid_idx = np.where(valid_mask[i] > 0)[0]
-            if len(valid_idx) < 2:
-                continue
-                
-            ys_valid = h_samples[valid_idx]
-            xs_valid = lanes[i, valid_idx]
-            
-            # Fit line: x = k * y + b
-            k, b = np.polyfit(ys_valid, xs_valid, 1)
-            
-            # Extrapolate to all y samples
-            # Only fill in where mask is 0 (i.e., extend downwards or upwards)
-            # But typically we care about extending downwards to match anchor base
-            
-            # Let's fill ALL points based on the line, but only mark them valid for matching purposes?
-            # No, we should only fill points that are currently invalid.
-            
-            invalid_idx = np.where(valid_mask[i] == 0)[0]
-            if len(invalid_idx) > 0:
-                ys_invalid = h_samples[invalid_idx]
-                xs_pred = k * ys_invalid + b
-                
-                # Update extended lanes
-                extended_lanes[i, invalid_idx] = xs_pred
-                # Mark as valid for matching assignment
-                extended_mask[i, invalid_idx] = 1
-                
-        return extended_lanes, extended_mask
-
-    def _extend_gt_lanes(self, lanes, valid_mask, h_samples):
-        # Extend GT lanes to the bottom of the image using linear extrapolation
-        # This helps anchors match short lanes that don't reach the bottom
-        num_gt, num_y = lanes.shape
-        extended_lanes = lanes.copy()
-        extended_mask = valid_mask.copy()
-        
-        h_samples = np.asarray(h_samples, dtype=np.float32)
         
         for i in range(num_gt):
             valid_idx = np.where(valid_mask[i] > 0)[0]
@@ -149,7 +109,6 @@ class TuSimpleDataset(Dataset):
         if not h_samples or not lanes_raw:
             return None, None
 
-        # Expect length equals y_samples; we keep fixed length as is.
         num_y = len(h_samples)
         lanes = []
         valid_mask = []
@@ -165,35 +124,6 @@ class TuSimpleDataset(Dataset):
         valid_mask = np.stack(valid_mask, axis=0)  # [N, num_y]
 
         if num_y != self.y_samples:
-            # If dataset provides different y_samples, we keep it but warn in meta.
-            pass
-
-        return lanes, valid_mask
-
-    def _parse_lanes(self, item):
-        h_samples = item.get("h_samples", [])
-        lanes_raw = item.get("lanes", [])
-
-        if not h_samples or not lanes_raw:
-            return None, None
-
-        # Expect length equals y_samples; we keep fixed length as is.
-        num_y = len(h_samples)
-        lanes = []
-        valid_mask = []
-
-        for lane in lanes_raw:
-            lane = np.array(lane, dtype=np.float32)
-            mask = (lane >= 0).astype(np.uint8)
-            lane[lane < 0] = 0.0
-            lanes.append(lane)
-            valid_mask.append(mask)
-
-        lanes = np.stack(lanes, axis=0)  # [N, num_y]
-        valid_mask = np.stack(valid_mask, axis=0)  # [N, num_y]
-
-        if num_y != self.y_samples:
-            # If dataset provides different y_samples, we keep it but warn in meta.
             pass
 
         return lanes, valid_mask

@@ -6,16 +6,23 @@ from typing import List, Dict, Any
 class LaneDecoder:
     """
     Decode model outputs (cls_logits, reg_preds) into lane coordinates.
+
+    The classification score from QualityFocalLoss represents predicted IoU
+    (matching quality), NOT a binary confidence.  Decoding must respect this
+    semantic: use a quality-aligned threshold, tight NMS, and a hard cap on
+    the number of output lanes per image.
     """
     def __init__(
         self,
-        score_thr: float = 0.5,
-        nms_thr: float = 45.0,
+        score_thr: float = 0.6,
+        nms_thr: float = 20.0,
         use_polyfit: bool = True,
         nms_min_common_points: int = 8,
         nms_overlap_ratio_thr: float = 0.6,
         nms_top_dist_ratio: float = 1.25,
         nms_bottom_dist_ratio: float = 1.0,
+        max_lanes: int = 5,
+        min_valid_points: int = 4,
     ):
         self.score_thr = score_thr
         self.nms_thr = nms_thr
@@ -24,6 +31,8 @@ class LaneDecoder:
         self.nms_overlap_ratio_thr = float(nms_overlap_ratio_thr)
         self.nms_top_dist_ratio = float(nms_top_dist_ratio)
         self.nms_bottom_dist_ratio = float(nms_bottom_dist_ratio)
+        self.max_lanes = int(max_lanes)
+        self.min_valid_points = int(min_valid_points)
 
     def _is_duplicate_lane(self, lane_a: Dict[str, Any], lane_b: Dict[str, Any]) -> bool:
         common_mask = (lane_a['valid_mask'] > 0) & (lane_b['valid_mask'] > 0)
@@ -123,7 +132,7 @@ class LaneDecoder:
             candidates = []
             for k in range(len(keep_indices)):
                 valid_len = final_mask_np[k].sum()
-                if valid_len < 2:
+                if valid_len < self.min_valid_points:
                     continue
                 candidates.append({
                     'score': float(keep_scores_np[k]),
@@ -154,7 +163,11 @@ class LaneDecoder:
             else:
                 keep_lanes = candidates
 
-            # 5. Polynomial Fit Smoothing (Fix for wavy lines and starting drift)
+            # 5. Hard cap: only keep the top-scoring lanes (already sorted by score)
+            if self.max_lanes > 0:
+                keep_lanes = keep_lanes[:self.max_lanes]
+
+            # 6. Polynomial Fit Smoothing (Fix for wavy lines and starting drift)
             final_lanes = []
             for lane in keep_lanes:
                 valid_mask = lane['valid_mask'] > 0

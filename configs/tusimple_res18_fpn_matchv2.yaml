@@ -88,17 +88,19 @@ train:
   lr_gamma: 0.3
 
 eval:
-  score_thr: 0.5
-  nms_thr: 30.0
+  score_thr: 0.6
+  nms_thr: 20.0
   nms_min_common_points: 8
   nms_overlap_ratio_thr: 0.6
   nms_top_dist_ratio: 1.25
   nms_bottom_dist_ratio: 1.0
   disable_polyfit: false
+  max_lanes: 5
+  min_valid_points: 4
 
 match:
-  topk_per_gt: 2
-  min_force_pos_iou: 0.25
+  topk_per_gt: 4
+  min_force_pos_iou: 0.15
   use_soft_gating: true
   soft_common: false
   soft_top: true

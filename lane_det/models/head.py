@@ -58,6 +58,15 @@ class AnchorHead(nn.Module):
         self.use_refinement = bool(use_refinement)
         self._debug_printed = False
 
+        # Learnable projection that maps raw pixel-offset (large magnitude)
+        # into the same scale as BN-normalised CNN features before any
+        # concatenation or encoding.  This prevents the regression signal
+        # from drowning out visual features.
+        self.reg_proj = nn.Sequential(
+            nn.Conv1d(1, 1, kernel_size=1, bias=True),
+            nn.Tanh(),
+        )
+
         # Classification uses both appearance features and a lightweight
         # geometry summary derived from the current regression prediction.
         self.cls_geo_encoder = nn.Sequential(
@@ -141,12 +150,10 @@ class AnchorHead(nn.Module):
 
         # 4. Regression stage2 refinement
         if self.use_refinement:
-            # Detach stage1 predictions so gradients from stage2 don't flow back into stage1
-            # We want stage1 to focus on coarse localization, and stage2 on residuals.
             stage1_pred_detached = reg_stage1.detach().view(b * num_anchors, 1, num_y)
-            
-            # Concatenate features with stage1 predictions
-            seq_features_stage2 = torch.cat([seq_features, stage1_pred_detached], dim=1)
+            stage1_proj = self.reg_proj(stage1_pred_detached)
+
+            seq_features_stage2 = torch.cat([seq_features, stage1_proj], dim=1)
             
             reg_delta_stage2 = self.reg_head_stage2(seq_features_stage2).squeeze(1)
             reg_delta_stage2 = reg_delta_stage2.view(b, num_anchors, num_y)
@@ -156,7 +163,8 @@ class AnchorHead(nn.Module):
             reg_final = reg_stage1
 
         # 5. Classification with geometric context
-        cls_reg_source = reg_final.detach().view(b * num_anchors, 1, num_y)
+        cls_reg_raw = reg_final.detach().view(b * num_anchors, 1, num_y)
+        cls_reg_source = self.reg_proj(cls_reg_raw)
         cls_geo = self.cls_geo_encoder(cls_reg_source).view(b, num_anchors, c, num_y).permute(0, 2, 1, 3)
         if self.use_masked_pooling:
             cls_geo_sum = (cls_geo * valid_mask).sum(dim=3)

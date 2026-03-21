@@ -72,12 +72,14 @@ def main():
     parser.add_argument("--ckpt", type=str, required=True, help="Path to checkpoint file")
     parser.add_argument("--out", type=str, default=None, help="Path to save output json")
     parser.add_argument("--split", type=str, choices=["train", "val", "test"], default=None, help="Dataset split to run")
-    parser.add_argument("--score_thr", type=float, default=0.5, help="Score threshold for decoding")
-    parser.add_argument("--nms_thr", type=float, default=30.0, help="Lane NMS distance threshold in pixels; <= 0 disables NMS")
+    parser.add_argument("--score_thr", type=float, default=0.6, help="Score threshold for decoding")
+    parser.add_argument("--nms_thr", type=float, default=20.0, help="Lane NMS distance threshold in pixels; <= 0 disables NMS")
     parser.add_argument("--nms_min_common_points", type=int, default=8, help="Minimum shared valid points required before duplicate check")
     parser.add_argument("--nms_overlap_ratio_thr", type=float, default=0.6, help="Minimum overlap ratio required before duplicate check")
     parser.add_argument("--nms_top_dist_ratio", type=float, default=1.25, help="Top-segment distance threshold ratio relative to nms_thr")
     parser.add_argument("--nms_bottom_dist_ratio", type=float, default=1.0, help="Bottom-segment distance threshold ratio relative to nms_thr")
+    parser.add_argument("--max_lanes", type=int, default=5, help="Maximum number of lanes to output per image")
+    parser.add_argument("--min_valid_points", type=int, default=4, help="Minimum valid points required to keep a lane")
     parser.add_argument("--disable-polyfit", action="store_true", help="Disable polynomial smoothing in decoder")
     args = parser.parse_args()
     
@@ -133,6 +135,8 @@ def main():
         nms_overlap_ratio_thr=args.nms_overlap_ratio_thr,
         nms_top_dist_ratio=args.nms_top_dist_ratio,
         nms_bottom_dist_ratio=args.nms_bottom_dist_ratio,
+        max_lanes=args.max_lanes,
+        min_valid_points=args.min_valid_points,
     )
     converter = TuSimpleConverter() # Default h_samples
     
