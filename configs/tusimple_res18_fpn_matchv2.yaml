@@ -102,6 +102,7 @@ match:
   penalty_common_ratio: 0.2
   penalty_top_err: 0.85
   penalty_angle: 0.7
+  pos_score_min: 0.6
   neg_thr: 0.10
 
 augmentation:

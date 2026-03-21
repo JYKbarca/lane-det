@@ -46,6 +46,7 @@ class LabelAssigner:
         penalty_common_ratio: float = 1.0,
         penalty_top_err: float = 1.0,
         penalty_angle: float = 1.0,
+        pos_score_min: float = 0.6,
     ):
         self.neg_thr = float(neg_thr)
         self.min_common_points = int(min_common_points)
@@ -78,6 +79,7 @@ class LabelAssigner:
         self.penalty_common_ratio = float(np.clip(penalty_common_ratio, 0.0, 1.0))
         self.penalty_top_err = float(np.clip(penalty_top_err, 0.0, 1.0))
         self.penalty_angle = float(np.clip(penalty_angle, 0.0, 1.0))
+        self.pos_score_min = float(np.clip(pos_score_min, 0.0, 1.0))
 
     @classmethod
     def from_config(cls, cfg):
@@ -113,7 +115,17 @@ class LabelAssigner:
             penalty_common_ratio=float(mcfg.get("penalty_common_ratio", 1.0)),
             penalty_top_err=float(mcfg.get("penalty_top_err", 1.0)),
             penalty_angle=float(mcfg.get("penalty_angle", 1.0)),
+            pos_score_min=float(mcfg.get("pos_score_min", 0.6)),
         )
+
+    def _map_iou_to_cls_target(self, iou: float) -> float:
+        if iou < self.min_force_pos_iou:
+            return 0.0
+        if self.min_force_pos_iou >= 1.0:
+            return 1.0
+        norm = (float(iou) - self.min_force_pos_iou) / (1.0 - self.min_force_pos_iou)
+        norm = float(np.clip(norm, 0.0, 1.0))
+        return self.pos_score_min + (1.0 - self.pos_score_min) * norm
 
     def _line_iou(self, anchor_xs, gt_xs, common_mask, width_per_anchor):
         """
@@ -412,7 +424,7 @@ class LabelAssigner:
         pos_ids = np.where(pos)[0]
         for a in pos_ids:
             g = matched_gt_idx[a]
-            cls_target[a] = max(float(iou_mat[a, g]), 0.0)
+            cls_target[a] = self._map_iou_to_cls_target(float(iou_mat[a, g]))
 
         for a in pos_ids:
             g = matched_gt_idx[a]

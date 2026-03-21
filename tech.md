@@ -1344,13 +1344,13 @@ stage2 预测的是：
 
 当前项目训练时可能涉及 3 类损失：
 
-1. 分类损失：`FocalLoss`
+1. 分类损失：`QualityBCELoss`
 2. 回归损失：`RegLoss`，内部为 `Smooth L1`
 3. 线形相似性损失：`SoftLineOverlapLoss`
 
 其中前两者是主损失，第三项是可选增强项。
 
-### 4.8 分类损失 `FocalLoss`
+### 4.8 分类损失 `QualityBCELoss`
 
 分类损失定义在 `lane_det/losses/focal_loss.py`。
 
@@ -1359,13 +1359,19 @@ stage2 预测的是：
 输入是：
 
 - `inputs`：模型输出的 `cls_logits`
-- `targets`：`cls_label`
+- `targets`：`cls_target`
 
 其中目标值取值为：
 
-- `1`：正样本
+- `(0, 1]`：正样本质量分数，当前实现中通常取匹配到的 `Line IoU`
 - `0`：负样本
 - `-1`：忽略样本
+
+这意味着当前项目的分类监督已经不是“纯二值分类”，而是“质量感知分类”：
+
+- 分数越高，表示该 Anchor 与 GT 的匹配质量越好
+- 分数越低但仍大于 0，表示它是正样本，但质量较弱
+- 负样本仍然使用 `0`
 
 #### 4.8.2 忽略样本如何处理
 
@@ -1379,24 +1385,20 @@ stage2 预测的是：
 
 #### 4.8.3 核心计算逻辑
 
-`FocalLoss` 内部先计算：
+`QualityBCELoss` 内部先计算：
 
 - `binary_cross_entropy_with_logits`
 
-然后根据概率 `pt` 计算 focal reweighting：
-
-- 难样本损失更大
-- 易样本损失更小
-
-同时引入：
+但它不会再额外做 focal reweighting，也不使用：
 
 - `alpha`
 - `gamma`
 
-它们分别控制：
+它的核心思想更接近于：
 
-- 正负样本的平衡
-- 对难样本的聚焦程度
+- 直接用 BCE 监督分类分支
+- 让正样本目标值携带匹配质量信息
+- 用目标值大小区分“强正样本”和“弱正样本”
 
 #### 4.8.4 当前实现的一个重要细节
 
@@ -2842,7 +2844,7 @@ Converter 会将每条 lane 的有效点：
 这个测试会：
 
 1. 构造随机 logits 和 target
-2. 测试 `FocalLoss`
+2. 测试 `QualityBCELoss`
 3. 构造随机回归输入、目标和 mask
 4. 测试 `RegLoss`
 
@@ -3074,7 +3076,7 @@ Converter 会将每条 lane 的有效点：
 12. 分类头输出每条 Anchor 的存在分数
 13. 回归头输出每条 Anchor 的逐点偏移
 14. refinement 阶段对回归结果做二次细化
-15. 使用 `FocalLoss + SmoothL1 + 可选 line loss` 联合训练
+15. 使用 `QualityBCELoss + SmoothL1 + 可选 line loss` 联合训练
 16. 使用 `Adam + MultiStepLR + 梯度累计` 更新参数
 17. 每个 epoch 后在验证集上做完整解码与评估
 18. 保存 `epoch`、`last`、`best` checkpoint
