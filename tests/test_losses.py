@@ -6,11 +6,11 @@ import os
 # 将项目根目录加入 sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from lane_det.losses import QualityBCELoss, RegLoss
+from lane_det.losses import QualityFocalLoss, RegLoss
 
 class TestLosses(unittest.TestCase):
     def test_quality_bce_loss(self):
-        fl = QualityBCELoss()
+        fl = QualityFocalLoss()
         inputs = torch.randn(10, 1)
         targets = torch.rand(10, 1)
         loss = fl(inputs, targets)

@@ -133,8 +133,9 @@ class LaneDecoder:
                     'length': int(valid_len)
                 })
             
-            # Sort by score * sqrt(length) descending to prioritize long lanes
-            candidates.sort(key=lambda x: x['score'] * np.sqrt(x['length']), reverse=True)
+            # Sort only by classification score so train-time score semantics
+            # remain aligned with decode-time keep priority.
+            candidates.sort(key=lambda x: x['score'], reverse=True)
             
             # 4. Apply Lane NMS when enabled
             if self.nms_thr is not None and self.nms_thr > 0:

@@ -17,7 +17,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from lane_det.datasets.tusimple import TuSimpleDataset
 from lane_det.models import LaneDetector
-from lane_det.losses import QualityBCELoss, RegLoss, SoftLineOverlapLoss
+from lane_det.losses import QualityFocalLoss, RegLoss, SoftLineOverlapLoss
 from lane_det.anchors import AnchorSet
 from lane_det.postprocess import LaneDecoder
 from lane_det.metrics import TuSimpleConverter
@@ -309,7 +309,7 @@ def main():
     accumulation_steps = 2
     
     # Losses
-    cls_criterion = QualityBCELoss()
+    cls_criterion = QualityFocalLoss()
     reg_criterion = RegLoss()
     reg_stage1_w = float(cfg.get("loss", {}).get("reg_loss_stage1_weight", 0.5))
     reg_stage2_w = float(cfg.get("loss", {}).get("reg_loss_stage2_weight", 1.0))

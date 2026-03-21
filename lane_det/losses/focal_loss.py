@@ -2,9 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class QualityBCELoss(nn.Module):
-    def __init__(self, reduction='mean'):
-        super(QualityBCELoss, self).__init__()
+class QualityFocalLoss(nn.Module):
+    def __init__(self, alpha=0.75, gamma=2.0, reduction='mean'):
+        super(QualityFocalLoss, self).__init__()
+        self.alpha = float(alpha)
+        self.gamma = float(gamma)
         self.reduction = reduction
 
     def forward(self, inputs, targets):
@@ -21,7 +23,15 @@ class QualityBCELoss(nn.Module):
 
         inputs = inputs[valid_mask]
         targets = targets[valid_mask]
-        loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pred_sigmoid = torch.sigmoid(inputs)
+        bce = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+
+        pos_mask = (targets > 0).to(inputs.dtype)
+        neg_mask = (targets == 0).to(inputs.dtype)
+
+        pos_weight = targets * pos_mask
+        neg_weight = self.alpha * pred_sigmoid.pow(self.gamma) * neg_mask
+        loss = bce * (pos_weight + neg_weight)
 
         if self.reduction == 'mean':
             pos_mask = (targets > 0)
