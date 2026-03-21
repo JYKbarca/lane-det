@@ -58,10 +58,18 @@ class AnchorHead(nn.Module):
         self.use_refinement = bool(use_refinement)
         self._debug_printed = False
 
-        # Classification head
-        # Takes pooled features (mean over Y) -> [B, C, Num_Anchors]
+        # Classification uses both appearance features and a lightweight
+        # geometry summary derived from the current regression prediction.
+        self.cls_geo_encoder = nn.Sequential(
+            nn.Conv1d(1, in_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm1d(in_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(in_channels, in_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm1d(in_channels),
+            nn.ReLU(inplace=True),
+        )
         self.cls_head = nn.Sequential(
-            nn.Conv1d(in_channels, in_channels, 1),
+            nn.Conv1d(in_channels * 2, in_channels, 1),
             nn.BatchNorm1d(in_channels),
             nn.ReLU(),
             nn.Conv1d(in_channels, 1, 1) # Output: [B, 1, Num_Anchors]
@@ -116,8 +124,7 @@ class AnchorHead(nn.Module):
         
         b, c, num_anchors, num_y = pooled.shape
         
-        # 2. Classification
-        # Mean pool over Y dimension -> [B, C, Num_Anchors]
+        # 2. Appearance summary for classification
         if self.use_masked_pooling:
             valid_mask = self._get_anchor_valid_mask(anchors, pooled.device, pooled.dtype)
             pooled_sum = (pooled * valid_mask).sum(dim=3)
@@ -125,9 +132,6 @@ class AnchorHead(nn.Module):
             pooled_mean = pooled_sum / valid_count
         else:
             pooled_mean = pooled.mean(dim=3)
-        
-        cls_logits = self.cls_head(pooled_mean) # [B, 1, Num_Anchors]
-        cls_logits = cls_logits.squeeze(1) # [B, Num_Anchors]
         
         # 3. Regression stage1
         # Model each anchor as a feature sequence along Y: [B * NumAnchors, C, NumY]
@@ -151,11 +155,25 @@ class AnchorHead(nn.Module):
             reg_delta_stage2 = torch.zeros_like(reg_stage1)
             reg_final = reg_stage1
 
+        # 5. Classification with geometric context
+        cls_reg_source = reg_final.detach().view(b * num_anchors, 1, num_y)
+        cls_geo = self.cls_geo_encoder(cls_reg_source).view(b, num_anchors, c, num_y).permute(0, 2, 1, 3)
+        if self.use_masked_pooling:
+            cls_geo_sum = (cls_geo * valid_mask).sum(dim=3)
+            cls_geo_mean = cls_geo_sum / valid_count
+        else:
+            cls_geo_mean = cls_geo.mean(dim=3)
+        cls_input = torch.cat([pooled_mean, cls_geo_mean], dim=1)
+        cls_logits = self.cls_head(cls_input) # [B, 1, Num_Anchors]
+        cls_logits = cls_logits.squeeze(1) # [B, Num_Anchors]
+
         if self.debug_shapes and (not self._debug_printed):
             print(
                 "[AnchorHead Debug] "
                 f"pooled={tuple(pooled.shape)}, "
                 f"pooled_mean={tuple(pooled_mean.shape)}, "
+                f"cls_geo_mean={tuple(cls_geo_mean.shape)}, "
+                f"cls_input={tuple(cls_input.shape)}, "
                 f"cls_logits={tuple(cls_logits.shape)}, "
                 f"reg_stage1={tuple(reg_stage1.shape)}, "
                 f"reg_delta_stage2={tuple(reg_delta_stage2.shape)}, "
