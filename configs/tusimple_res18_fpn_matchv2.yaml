@@ -99,8 +99,8 @@ eval:
   min_valid_points: 4
 
 match:
-  topk_per_gt: 4
-  min_force_pos_iou: 0.15
+  topk_per_gt: 2
+  min_force_pos_iou: 0.25
   use_soft_gating: true
   soft_common: false
   soft_top: true
@@ -108,7 +108,7 @@ match:
   penalty_common_ratio: 0.2
   penalty_top_err: 0.85
   penalty_angle: 0.7
-  pos_score_min: 0.6
+  pos_score_min: 0.7
   neg_thr: 0.10
 
 augmentation:
