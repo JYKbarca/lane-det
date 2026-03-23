@@ -77,12 +77,15 @@ class AnchorHead(nn.Module):
             nn.BatchNorm1d(in_channels),
             nn.ReLU(inplace=True),
         )
-        self.cls_head = nn.Sequential(
-            nn.Conv1d(in_channels * 2, in_channels, 1),
+        self.cls_seq_encoder = nn.Sequential(
+            nn.Conv1d(in_channels * 2, in_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm1d(in_channels),
-            nn.ReLU(),
-            nn.Conv1d(in_channels, 1, 1) # Output: [B, 1, Num_Anchors]
+            nn.ReLU(inplace=True),
+            nn.Conv1d(in_channels, in_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm1d(in_channels),
+            nn.ReLU(inplace=True),
         )
+        self.cls_pred = nn.Conv1d(in_channels, 1, kernel_size=1)
         
         # Sequence heads model lane geometry along the Y dimension instead of
         # treating all sampled points as independent flattened tokens.
@@ -133,14 +136,12 @@ class AnchorHead(nn.Module):
         
         b, c, num_anchors, num_y = pooled.shape
         
-        # 2. Appearance summary for classification
+        # 2. Keep the pooled sequence for classification so the classifier can
+        # inspect lane shape along Y instead of seeing only a global mean.
         if self.use_masked_pooling:
             valid_mask = self._get_anchor_valid_mask(anchors, pooled.device, pooled.dtype)
-            pooled_sum = (pooled * valid_mask).sum(dim=3)
-            valid_count = valid_mask.sum(dim=3).clamp(min=1.0)
-            pooled_mean = pooled_sum / valid_count
         else:
-            pooled_mean = pooled.mean(dim=3)
+            valid_mask = None
         
         # 3. Regression stage1
         # Model each anchor as a feature sequence along Y: [B * NumAnchors, C, NumY]
@@ -166,22 +167,29 @@ class AnchorHead(nn.Module):
         cls_reg_raw = reg_final.detach().view(b * num_anchors, 1, num_y)
         cls_reg_source = self.reg_proj(cls_reg_raw)
         cls_geo = self.cls_geo_encoder(cls_reg_source).view(b, num_anchors, c, num_y).permute(0, 2, 1, 3)
+        cls_seq_input = torch.cat([pooled, cls_geo], dim=1)
+        cls_seq_input = cls_seq_input.permute(0, 2, 1, 3).contiguous().view(b * num_anchors, c * 2, num_y)
         if self.use_masked_pooling:
-            cls_geo_sum = (cls_geo * valid_mask).sum(dim=3)
-            cls_geo_mean = cls_geo_sum / valid_count
+            cls_seq_mask = valid_mask.expand(b, 1, num_anchors, num_y).permute(0, 2, 1, 3).contiguous().view(
+                b * num_anchors, 1, num_y
+            )
+            cls_seq_input = cls_seq_input * cls_seq_mask
+        cls_seq_feat = self.cls_seq_encoder(cls_seq_input)
+        cls_seq_logits = self.cls_pred(cls_seq_feat)
+        if self.use_masked_pooling:
+            valid_count = cls_seq_mask.sum(dim=2).clamp(min=1.0)
+            cls_logits = (cls_seq_logits * cls_seq_mask).sum(dim=2) / valid_count
         else:
-            cls_geo_mean = cls_geo.mean(dim=3)
-        cls_input = torch.cat([pooled_mean, cls_geo_mean], dim=1)
-        cls_logits = self.cls_head(cls_input) # [B, 1, Num_Anchors]
-        cls_logits = cls_logits.squeeze(1) # [B, Num_Anchors]
+            cls_logits = cls_seq_logits.mean(dim=2)
+        cls_logits = cls_logits.view(b, num_anchors)
 
         if self.debug_shapes and (not self._debug_printed):
             print(
                 "[AnchorHead Debug] "
                 f"pooled={tuple(pooled.shape)}, "
-                f"pooled_mean={tuple(pooled_mean.shape)}, "
-                f"cls_geo_mean={tuple(cls_geo_mean.shape)}, "
-                f"cls_input={tuple(cls_input.shape)}, "
+                f"cls_geo={tuple(cls_geo.shape)}, "
+                f"cls_seq_input={tuple(cls_seq_input.shape)}, "
+                f"cls_seq_feat={tuple(cls_seq_feat.shape)}, "
                 f"cls_logits={tuple(cls_logits.shape)}, "
                 f"reg_stage1={tuple(reg_stage1.shape)}, "
                 f"reg_delta_stage2={tuple(reg_delta_stage2.shape)}, "
