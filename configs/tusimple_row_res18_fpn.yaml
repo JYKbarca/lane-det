@@ -1,0 +1,45 @@
+dataset:
+  name: tusimple
+  root: /root/autodl-tmp/datasets/archive/TUSimple/train_set
+  list_file: /root/autodl-tmp/datasets/archive/TUSimple/train_set/train.json
+  img_size: [1280, 720]
+  y_samples: 56
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+paths:
+  checkpoint_root: /root/autodl-tmp/checkpoints/lane-det-row
+  output_root: /root/autodl-tmp/outputs/lane-det-row
+
+row:
+  max_lanes: 5
+  num_y: 56
+
+model:
+  backbone: resnet18
+  fpn_out: 128
+  row_hidden_dim: 256
+  row_dropout: 0.1
+
+loss:
+  smooth_l1_beta: 1.0
+  exist_weight: 1.0
+  coord_weight: 1.0
+
+train:
+  batch_size: 4
+  lr: 0.001
+  epochs: 20
+  weight_decay: 0.0001
+  lr_milestones: [12, 18]
+  lr_gamma: 0.3
+
+eval:
+  exist_score_thr: 0.5
+
+augmentation:
+  flip_p: 0.5
+  brightness: 0.3
+  contrast: 0.3
+  saturation: 0.3
+  color_p: 0.8
