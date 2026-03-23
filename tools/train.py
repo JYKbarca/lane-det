@@ -407,7 +407,7 @@ def main():
     scheduler = MultiStepLR(optimizer, milestones=lr_milestones, gamma=lr_gamma)
 
     # Gradient Accumulation Steps (Simulate larger batch size)
-    accumulation_steps = 2
+    accumulation_steps = 1
     
     # Losses
     cls_criterion = QualityFocalLoss()
