@@ -91,6 +91,7 @@ def build_collate_fn(target_builder):
             return None
 
         images = torch.stack([torch.from_numpy(sample["image"]).float() for sample in batch])
+        img_width = float(images.shape[-1])
 
         row_targets = [
             target_builder.build(
@@ -114,10 +115,13 @@ def build_collate_fn(target_builder):
             [torch.from_numpy(target["row_h_samples"]).float() for target in row_targets]
         )
 
+        x_targets_norm = x_targets / max(img_width - 1.0, 1.0)
+
         return {
             "images": images,
             "exist_targets": exist_targets,
             "x_targets": x_targets,
+            "x_targets_norm": x_targets_norm,
             "coord_masks": coord_masks,
             "row_h_samples": row_h_samples,
             "metas": [sample.get("meta", {}) for sample in batch],
@@ -142,9 +146,10 @@ def masked_smooth_l1_loss(pred, target, mask, beta=1.0):
     return weighted.sum() / denom
 
 
-def decode_row_predictions(exist_logits, x_coords, row_h_samples, score_thr):
+def decode_row_predictions(exist_logits, x_coords_norm, row_h_samples, score_thr, img_w):
     exist_scores = torch.sigmoid(exist_logits)
     lanes_batch = []
+    x_coords = x_coords_norm * max(float(img_w) - 1.0, 1.0)
 
     for scores_b, coords_b, ys_b in zip(exist_scores, x_coords, row_h_samples):
         lane_dicts = []
@@ -186,8 +191,14 @@ def validate(model, loader, samples, cfg, device):
             row_h_samples = batch["row_h_samples"].to(device)
             metas = batch["metas"]
 
-            exist_logits, x_coords = model(images)
-            decoded_batch = decode_row_predictions(exist_logits, x_coords, row_h_samples, score_thr)
+            exist_logits, x_coords_norm = model(images)
+            decoded_batch = decode_row_predictions(
+                exist_logits,
+                x_coords_norm,
+                row_h_samples,
+                score_thr,
+                images.shape[-1],
+            )
             img_h, img_w = images.shape[-2:]
 
             for lane_dicts, meta in zip(decoded_batch, metas):
@@ -323,15 +334,15 @@ def main():
 
             images = batch["images"].to(device)
             exist_targets = batch["exist_targets"].to(device)
-            x_targets = batch["x_targets"].to(device)
+            x_targets_norm = batch["x_targets_norm"].to(device)
             coord_masks = batch["coord_masks"].to(device)
 
             optimizer.zero_grad()
-            exist_logits, x_coords = model(images)
+            exist_logits, x_coords_norm = model(images)
 
             lane_masks = coord_masks * exist_targets.unsqueeze(-1)
             exist_loss = exist_criterion(exist_logits, exist_targets)
-            coord_loss = masked_smooth_l1_loss(x_coords, x_targets, lane_masks, beta=coord_beta)
+            coord_loss = masked_smooth_l1_loss(x_coords_norm, x_targets_norm, lane_masks, beta=coord_beta)
             loss = exist_weight * exist_loss + coord_weight * coord_loss
 
             loss.backward()

@@ -35,7 +35,7 @@ train:
   lr_gamma: 0.3
 
 eval:
-  exist_score_thr: 0.5
+  exist_score_thr: 0.7
 
 augmentation:
   flip_p: 0.5
