@@ -25,6 +25,7 @@ loss:
   smooth_l1_beta: 1.0
   exist_weight: 1.0
   coord_weight: 1.0
+  valid_weight: 1.0
 
 train:
   batch_size: 4
@@ -36,6 +37,7 @@ train:
 
 eval:
   exist_score_thr: 0.7
+  valid_thr: 0.5
 
 augmentation:
   flip_p: 0.5

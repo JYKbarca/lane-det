@@ -13,20 +13,34 @@ class RowLaneHead(nn.Module):
             nn.BatchNorm2d(in_channels),
             nn.ReLU(inplace=True),
         )
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.shared = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(in_channels, hidden_dim),
+        self.row_pool = nn.AdaptiveAvgPool2d((self.num_y, 1))
+        self.row_encoder = nn.Sequential(
+            nn.Conv1d(in_channels, hidden_dim, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(p=dropout),
         )
-        self.exist_head = nn.Linear(hidden_dim, self.num_lanes)
-        self.coord_head = nn.Linear(hidden_dim, self.num_lanes * self.num_y)
+        self.lane_queries = nn.Parameter(torch.randn(self.num_lanes, hidden_dim))
+        self.fuse = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+        )
+        self.exist_head = nn.Linear(hidden_dim, 1)
+        self.coord_head = nn.Linear(hidden_dim, 1)
+        self.valid_head = nn.Linear(hidden_dim, 1)
 
     def forward(self, feature_map):
         feat = self.proj(feature_map)
-        pooled = self.pool(feat)
-        hidden = self.shared(pooled)
-        exist_logits = self.exist_head(hidden)
-        x_coords = self.coord_head(hidden).view(-1, self.num_lanes, self.num_y)
-        return exist_logits, x_coords
+        row_feat = self.row_pool(feat).squeeze(-1)
+        row_feat = self.row_encoder(row_feat).transpose(1, 2)
+
+        lane_queries = self.lane_queries.unsqueeze(0).unsqueeze(2)
+        lane_feat = row_feat.unsqueeze(1) + lane_queries
+        lane_feat = self.fuse(lane_feat)
+
+        exist_context = lane_feat.mean(dim=2)
+        exist_logits = self.exist_head(exist_context).squeeze(-1)
+        valid_logits = self.valid_head(lane_feat).squeeze(-1)
+        x_coords = torch.sigmoid(self.coord_head(lane_feat).squeeze(-1))
+        return exist_logits, valid_logits, x_coords

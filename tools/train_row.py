@@ -146,17 +146,18 @@ def masked_smooth_l1_loss(pred, target, mask, beta=1.0):
     return weighted.sum() / denom
 
 
-def decode_row_predictions(exist_logits, x_coords_norm, row_h_samples, score_thr, img_w):
+def decode_row_predictions(exist_logits, valid_logits, x_coords_norm, row_h_samples, score_thr, img_w, valid_thr):
     exist_scores = torch.sigmoid(exist_logits)
+    valid_scores = torch.sigmoid(valid_logits)
     lanes_batch = []
     x_coords = x_coords_norm * max(float(img_w) - 1.0, 1.0)
 
-    for scores_b, coords_b, ys_b in zip(exist_scores, x_coords, row_h_samples):
+    for scores_b, valid_b, coords_b, ys_b in zip(exist_scores, valid_scores, x_coords, row_h_samples):
         lane_dicts = []
-        for lane_score, lane_xs in zip(scores_b, coords_b):
+        for lane_score, lane_valid, lane_xs in zip(scores_b, valid_b, coords_b):
             if float(lane_score) < score_thr:
                 continue
-            valid_mask = (lane_xs >= 0).to(torch.uint8)
+            valid_mask = (lane_valid >= valid_thr).to(torch.uint8)
             if int(valid_mask.sum()) < 2:
                 continue
             lane_dicts.append(
@@ -174,6 +175,7 @@ def decode_row_predictions(exist_logits, x_coords_norm, row_h_samples, score_thr
 def validate(model, loader, samples, cfg, device):
     model.eval()
     score_thr = float(cfg.get("eval", {}).get("exist_score_thr", 0.5))
+    valid_thr = float(cfg.get("eval", {}).get("valid_thr", 0.5))
     converter = TuSimpleConverter()
     gt_map = {item["raw_file"]: item for item in samples}
 
@@ -191,13 +193,15 @@ def validate(model, loader, samples, cfg, device):
             row_h_samples = batch["row_h_samples"].to(device)
             metas = batch["metas"]
 
-            exist_logits, x_coords_norm = model(images)
+            exist_logits, valid_logits, x_coords_norm = model(images)
             decoded_batch = decode_row_predictions(
                 exist_logits,
+                valid_logits,
                 x_coords_norm,
                 row_h_samples,
                 score_thr,
                 images.shape[-1],
+                valid_thr,
             )
             img_h, img_w = images.shape[-2:]
 
@@ -305,6 +309,7 @@ def main():
     coord_beta = float(cfg.get("loss", {}).get("smooth_l1_beta", 1.0))
     exist_weight = float(cfg.get("loss", {}).get("exist_weight", 1.0))
     coord_weight = float(cfg.get("loss", {}).get("coord_weight", 1.0))
+    valid_weight = float(cfg.get("loss", {}).get("valid_weight", 1.0))
 
     start_epoch = 0
     best_acc = float("-inf")
@@ -326,6 +331,7 @@ def main():
         epoch_loss = 0.0
         epoch_exist_loss = 0.0
         epoch_coord_loss = 0.0
+        epoch_valid_loss = 0.0
         start_time = time.time()
 
         for step, batch in enumerate(train_loader):
@@ -338,12 +344,16 @@ def main():
             coord_masks = batch["coord_masks"].to(device)
 
             optimizer.zero_grad()
-            exist_logits, x_coords_norm = model(images)
+            exist_logits, valid_logits, x_coords_norm = model(images)
 
             lane_masks = coord_masks * exist_targets.unsqueeze(-1)
             exist_loss = exist_criterion(exist_logits, exist_targets)
+            
+            valid_loss_unreduced = nn.functional.binary_cross_entropy_with_logits(valid_logits, coord_masks, reduction='none')
+            valid_loss = (valid_loss_unreduced * exist_targets.unsqueeze(-1)).sum() / (exist_targets.sum().clamp(min=1.0) * valid_logits.shape[-1])
+            
             coord_loss = masked_smooth_l1_loss(x_coords_norm, x_targets_norm, lane_masks, beta=coord_beta)
-            loss = exist_weight * exist_loss + coord_weight * coord_loss
+            loss = exist_weight * exist_loss + coord_weight * coord_loss + valid_weight * valid_loss
 
             loss.backward()
             optimizer.step()
@@ -351,12 +361,13 @@ def main():
             epoch_loss += float(loss.item())
             epoch_exist_loss += float(exist_loss.item())
             epoch_coord_loss += float(coord_loss.item())
+            epoch_valid_loss += float(valid_loss.item())
 
             if step % 10 == 0:
                 logger.info(
                     f"Epoch [{epoch+1}/{num_epochs}], Step [{step}/{len(train_loader)}], "
                     f"Loss: {loss.item():.4f} "
-                    f"(Exist: {exist_loss.item():.4f}, Coord: {coord_loss.item():.4f})"
+                    f"(Exist: {exist_loss.item():.4f}, Coord: {coord_loss.item():.4f}, Valid: {valid_loss.item():.4f})"
                 )
 
         elapsed = time.time() - start_time
@@ -364,7 +375,7 @@ def main():
         logger.info(
             f"Epoch [{epoch+1}/{num_epochs}] Finished. Time: {elapsed:.2f}s. "
             f"Avg Loss: {epoch_loss / denom:.4f} "
-            f"(Exist: {epoch_exist_loss / denom:.4f}, Coord: {epoch_coord_loss / denom:.4f})"
+            f"(Exist: {epoch_exist_loss / denom:.4f}, Coord: {epoch_coord_loss / denom:.4f}, Valid: {epoch_valid_loss / denom:.4f})"
         )
 
         val_metrics = validate(model, val_loader, val_dataset.samples, cfg, device)

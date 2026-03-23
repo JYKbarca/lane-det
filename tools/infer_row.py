@@ -80,6 +80,7 @@ def main():
         if args.exist_score_thr is not None
         else float(cfg.get("eval", {}).get("exist_score_thr", 0.5))
     )
+    valid_thr = float(cfg.get("eval", {}).get("valid_thr", 0.5))
 
     split = args.split
     if split is None:
@@ -129,13 +130,15 @@ def main():
             row_h_samples = batch["row_h_samples"].to(device)
             metas = batch["metas"]
 
-            exist_logits, x_coords_norm = model(images)
+            exist_logits, valid_logits, x_coords_norm = model(images)
             decoded_batch = decode_row_predictions(
                 exist_logits,
+                valid_logits,
                 x_coords_norm,
                 row_h_samples,
                 score_thr,
                 images.shape[-1],
+                valid_thr,
             )
 
             img_h, img_w = images.shape[-2:]

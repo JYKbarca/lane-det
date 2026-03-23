@@ -41,3 +41,9 @@ python tools/infer.py --cfg configs/tusimple_test.yaml --ckpt outputs/checkpoint
 python tools/infer.py --cfg configs/tusimple_res18_fpn.yaml --ckpt /root/autodl-tmp/checkpoints/lane-det/20260319_133410/last.pth --out /root/autodl-tmp/outputs/lane-det/pred/pred_no_polyfit.json
 
 python tools/evaluate.py --pred /root/autodl-tmp/outputs/lane-det/pred/pred_no_polyfit.json --gt /root/autodl-tmp/datasets/archive/TUSimple/train_set/val.json
+
+
+python tools/infer_row.py --cfg configs/tusimple_row_res18_fpn.yaml --ckpt /root/autodl-tmp/checkpoints/lane-det-row/20260324_011003/best.pth --split val --out /root/autodl-tmp/outputs/row-based/row_val.json
+
+
+python tools/visualize_row.py --pred /root/autodl-tmp/outputs/row-based/row_val.json --cfg configs/tusimple_row_res18_fpn.yaml --gt /root/autodl-tmp/datasets/archive/TUSimple/train_set/val.json --out /root/autodl-tmp/outputs/row-based/vis --num 20
