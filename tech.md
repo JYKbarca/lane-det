@@ -9,23 +9,37 @@
 
 - 步骤 1：项目整体入口与总数据流
 - 步骤 2：TuSimple 标注如何变成训练标签
-
-后续将继续补充：
-
 - 步骤 3：模型结构与前向传播
 - 步骤 4：损失函数与训练循环
 - 步骤 5：验证、推理、后处理与评估
 - 步骤 6：输出目录、实验产物与完整闭环
+- 步骤 7：两条技术分支的关系与当前 row/grid 主线
+
+后续若项目继续演化，可在本文档中追加：
+
+- 不同实验版本的对比总结
+- 两条分支的最终消融对照
+- 论文写作中的方法章节收束版本
 
 ---
 
 ## 一、项目总目标
 
-这个项目是一个基于 Ray Anchor 的车道线检测工程，核心任务是对 TuSimple 数据格式的道路图像进行车道线预测，并输出可用于官方评估的结果文件。
+这个项目是一个面向 TuSimple 数据格式的车道线检测工程，核心任务是对道路图像进行结构化车道线预测，并输出可用于官方评估的结果文件。
 
-当前主线方法可以概括为：
+从仓库当前真实状态看，项目已经不是单一路线，而是在同一套数据与评估底座上形成了两条技术分支：
 
-`TuSimple 数据集 -> 固定 y 采样的车道线表示 -> Ray Anchor 生成与匹配 -> ResNet18 + FPN + Anchor Head -> 车道线解码 -> TuSimple 格式导出 -> Accuracy / FP / FN 评估`
+- 分支 A：`anchor-based`。这是最早实现完成、工程链路最完整的一条路线，核心是 Ray Anchor 生成、Anchor-GT 匹配、Anchor 特征采样、逐点偏移回归与 lane-level 后处理。
+- 分支 B：`row/grid-based`。这是在 anchor 路线基础上继续演化出的新路线，核心是固定最多 `K` 条车道槽位，在固定 `Y` 个 row 上做横向位置网格分类，并通过期望解码恢复连续坐标。
+
+如果按毕业论文的口径来定义，这两条路线的角色应当区分为：
+
+- `anchor-based`：第一条完整跑通的结构化检测基线，也是问题诊断与路线转向的依据
+- `row/grid-based`：当前重点推进的主线方案，也是后续实验与论文方法部分更应该着重描述的对象
+
+因此，项目当前可以概括为：
+
+`TuSimple 数据集 -> 固定 y 采样的统一车道线表示 -> 分支 A（Ray Anchor 匹配与偏移回归）/ 分支 B（row/grid 位置分类） -> TuSimple 格式导出 -> Accuracy / FP / FN 评估`
 
 项目当前核心模块分布如下：
 
@@ -42,27 +56,23 @@
 
 ## 二、完整流程总览
 
-从端到端角度看，这个项目的完整技术流程是：
+从端到端角度看，这个项目的完整技术流程应拆成“共享底座 + 分支化检测主链”两部分：
 
 1. 准备 TuSimple 原始标注和图像数据
 2. 合并原始标注并划分 `train.json`、`val.json`
 3. 通过 `TuSimpleDataset` 读取图像与标注
 4. 将原始 `lanes + h_samples` 转为统一内部表示
 5. 对图像和车道标注同步做数据增强与缩放
-6. 为当前输入尺寸生成 Ray Anchor 集
-7. 将 GT 车道线与 Ray Anchor 做匹配，生成分类和回归监督标签
-8. 将样本组装成 batch，送入检测模型
-9. 模型输出每条 Ray Anchor 的分类分数与车道偏移回归量
-10. 使用分类损失和回归损失训练模型
-11. 在验证集上进行解码与 TuSimple 指标评估
-12. 保存 `epoch_x.pth`、`last.pth`、`best.pth`
-13. 使用训练好的 checkpoint 在验证集或测试集上推理
-14. 将预测结果解码为车道线
-15. 转换成 TuSimple 提交格式 `pred.json`
-16. 使用评估脚本输出 `Accuracy`、`FP`、`FN`
-17. 使用可视化脚本检查 GT、匹配结果和预测结果
+6. 在共享表示之后，进入两条检测路线之一
+7. 分支 A：生成 Ray Anchor，完成 Anchor-GT 匹配，构造 `cls_label + offset_label + offset_valid_mask`
+8. 分支 A：`LaneDetector` 输出每条 Anchor 的分类分数和逐点偏移，并经过解码、NMS、平滑后导出结果
+9. 分支 B：`RowTargetBuilder` 将车道线整理为固定槽位、固定 row 的 `exist + grid_targets`
+10. 分支 B：`RowLaneDetector` 输出 `exist_logits + grid_logits`，并经过 row 解码后直接导出结果
+11. 两条分支最终都通过 `TuSimpleConverter` 输出 `pred.json`
+12. 两条分支最终都通过 `LaneEval` 计算 `Accuracy`、`FP`、`FN`
+13. 通过 `vis_dataset.py`、`visualize.py`、`visualize_row.py`、`plot_loss.py` 回查问题并继续迭代
 
-下面按步骤详细展开。
+本文在结构上仍保留原有的步骤 2 到步骤 6，对 `anchor-based` 路线做完整细拆；随后在步骤 7 中集中总结 `row/grid-based` 路线，以及两条路线在论文中的关系。
 
 ---
 
@@ -72,33 +82,43 @@
 
 ### 1.1 外层入口脚本
 
-当前项目最核心的外层脚本有 4 个：
+当前项目最核心的外层脚本可以分成共享脚本与分支脚本两类：
 
-- `tools/prepare_tusimple_split.py`
-- `tools/train.py`
-- `tools/infer.py`
-- `tools/evaluate.py`
+- 共享脚本：`tools/prepare_tusimple_split.py`、`tools/evaluate.py`
+- `anchor-based` 分支：`tools/train.py`、`tools/infer.py`
+- `row/grid-based` 分支：`tools/train_row.py`、`tools/infer_row.py`
+
+另外还有几类辅助脚本：
+
+- 数据与匹配可视化：`tools/vis_dataset.py`
+- Anchor 分支预测可视化：`tools/visualize.py`
+- Row 分支预测可视化：`tools/visualize_row.py`
+- 训练曲线绘制：`tools/plot_loss.py`
 
 它们分别对应：
 
 - 数据列表准备
-- 模型训练与验证
-- checkpoint 推理导出
+- 分支化训练与验证
+- 分支化 checkpoint 推理导出
 - TuSimple 指标评估
 
 ### 1.2 配置文件是整个流程的总开关
 
-当前实验主配置文件是：
+当前最关键的配置文件有 3 类：
 
-- `configs/tusimple_res18_fpn_matchv2.yaml`
+- `anchor-based` 训练主配置：`configs/tusimple_res18_fpn_matchv2.yaml`
+- `row/grid-based` 训练主配置：`configs/tusimple_row_res18_fpn.yaml`
+- 测试/推理配置：`configs/tusimple_test.yaml`
 
-这个配置文件统一定义了整条流程所需的核心参数，包括：
+这些配置文件共同定义了整条流程所需的核心参数，包括：
 
 - 数据集根目录
 - 训练/验证列表文件
 - 输入图像尺寸
 - `y_samples` 数量
-- Anchor 的位置、角度和匹配阈值
+- 分支相关参数
+  - Anchor 的位置、角度和匹配阈值
+  - Row/Grid 的 `max_lanes`、`num_y`、`num_grids`
 - 模型结构参数
 - 损失函数权重
 - 训练超参数
@@ -137,21 +157,38 @@
 
 ### 1.5 训练与推理从哪里进入数据集
 
-训练入口 `tools/train.py` 会：
+`anchor-based` 训练入口 `tools/train.py` 会：
 
 1. 读取 YAML 配置
 2. 创建训练集 `TuSimpleDataset(cfg, split="train")`
 3. 创建验证集 `TuSimpleDataset(val_cfg, split="val")`
-4. 通过 `DataLoader + collate_fn` 组成 batch
-5. 进入模型训练和验证流程
+4. 通过 `DataLoader + collate_fn` 组成带有 Anchor 标签的 batch
+5. 进入 `LaneDetector` 的训练和验证流程
 
-推理入口 `tools/infer.py` 会：
+`row/grid-based` 训练入口 `tools/train_row.py` 会：
+
+1. 读取 YAML 配置
+2. 创建训练集 `TuSimpleDataset(cfg, split="train")`
+3. 创建验证集 `TuSimpleDataset(val_cfg, split="val")`
+4. 在 `collate_fn` 中使用 `RowTargetBuilder` 构造 row/grid 监督目标
+5. 进入 `RowLaneDetector` 的训练和验证流程
+
+`anchor-based` 推理入口 `tools/infer.py` 会：
 
 1. 读取 YAML 配置
 2. 加载指定 checkpoint
 3. 创建 `TuSimpleDataset(..., split="val" / "test")`
 4. 批量推理
-5. 解码为车道线
+5. 通过 `LaneDecoder` 解码为车道线
+6. 转为 TuSimple 输出格式并保存
+
+`row/grid-based` 推理入口 `tools/infer_row.py` 会：
+
+1. 读取 YAML 配置
+2. 加载指定 checkpoint
+3. 创建 `TuSimpleDataset(..., split="train" / "val" / "test")`
+4. 批量推理 `exist_logits + grid_logits`
+5. 通过 row 解码恢复连续车道坐标
 6. 转为 TuSimple 输出格式并保存
 
 评估入口 `tools/evaluate.py` 则负责：
@@ -165,7 +202,7 @@
 
 从工程角度讲，第 1 步做的事情不是训练模型，而是搭起端到端运行骨架：
 
-`配置读取 -> 数据列表准备 -> 数据集实例化 -> 训练/推理/评估脚本接管后续流程`
+`配置读取 -> 数据列表准备 -> 数据集实例化 -> 分支化训练/推理脚本接管后续流程 -> 统一评估与可视化`
 
 所以第 1 步的作用可以概括为：
 
@@ -177,12 +214,13 @@
 
 这一步是整个项目最重要的数据中间层。它解决的问题是：
 
-`原始 JSON 标注 -> 统一车道线表示 -> 数据增强/缩放 -> Ray Anchor 集生成 -> Ray Anchor 与 GT 匹配 -> 训练监督标签`
+`原始 JSON 标注 -> 统一车道线表示 -> 数据增强/缩放 -> 分支 A 的 Anchor 标签 / 分支 B 的 row/grid 标签`
 
 相关核心文件：
 
 - `lane_det/datasets/tusimple.py`
 - `lane_det/datasets/transforms.py`
+- `lane_det/datasets/row_target_builder.py`
 - `lane_det/anchors/anchor_generator.py`
 - `lane_det/anchors/label_assigner.py`
 
@@ -211,8 +249,9 @@ TuSimple 每条样本的关键字段主要有：
 3. 读取图像并转换为 RGB
 4. 解析 `lanes` 和 `h_samples`
 5. 对图像和标注同步应用变换
-6. 生成 Ray Anchor 并分配监督标签
-7. 返回训练或推理所需字段
+6. 若启用 Anchor 配置，则生成 Ray Anchor 并分配监督标签
+7. 若走 row/grid 分支，则保留标准化后的 `lanes`、`valid_mask`、`h_samples`，供后续 `RowTargetBuilder` 使用
+8. 返回训练或推理所需字段
 
 ### 2.3 原始车道线如何转成统一内部表示
 
@@ -447,22 +486,31 @@ Anchor 集只依赖这些固定因素：
 
 ### 2.13 Dataset 最终输出给训练器的字段
 
-经过 `collate_fn` 组装后，训练阶段拿到的 batch 主要包含：
+经过 `collate_fn` 组装后，训练阶段拿到的 batch 会随分支不同而变化：
 
-- `images`
-- `cls_labels`
-- `offset_labels`
-- `offset_masks`
-- `anchors`
-- `metas`
+- `anchor-based` 分支主要包含：
+  - `images`
+  - `cls_labels`
+  - `offset_labels`
+  - `offset_masks`
+  - `anchors`
+  - `metas`
+- `row/grid-based` 分支主要包含：
+  - `images`
+  - `exist_targets`
+  - `x_targets_norm`
+  - `coord_masks`
+  - `grid_targets`
+  - `row_h_samples`
+  - `metas`
 
-也就是说，从这一步开始，模型训练已经不直接面对原始 TuSimple JSON，而是面对整理完成的监督张量。
+也就是说，从这一步开始，模型训练已经不再直接面对原始 TuSimple JSON，而是面对按不同技术路线整理完成的监督张量。
 
 ### 2.14 第 2 步的本质
 
 第 2 步完成的是整个项目最关键的数据桥接工作：
 
-`原始车道线标注 -> 标准化车道线表示 -> Ray Anchor 匹配 -> 分类标签 + 偏移回归标签`
+`原始车道线标注 -> 标准化车道线表示 -> 分支化监督目标构造`
 
 没有这一步，后面的模型训练无法成立。
 
@@ -473,6 +521,8 @@ Anchor 集只依赖这些固定因素：
 这一步解决的问题是：
 
 `已经完成标签分配的 batch 数据 -> 如何进入神经网络 -> 网络内部如何提取特征 -> 如何沿 Ray Anchor 轨迹取特征 -> 如何输出分类分数和回归偏移`
+
+下面这一步主要详细拆解 `anchor-based` 分支的模型结构。`row/grid-based` 分支的模型结构会在步骤 7 中单独总结。
 
 这一步对应的核心文件为：
 
@@ -1133,13 +1183,15 @@ stage2 预测的是：
 - `lane_det/losses/soft_line_loss.py`
 - `tools/train.py`
 
+下面这一步主要详细拆解 `anchor-based` 分支的训练流程。`row/grid-based` 分支对应的 `tools/train_row.py` 会在步骤 7 中单独总结。
+
 如果说步骤 3 解决的是“模型怎么预测”，那么步骤 4 解决的就是：
 
 “模型预测出来之后，怎样告诉它哪里错了，以及如何通过迭代把参数优化到更好的状态。”
 
 ### 4.1 训练阶段的整体结构
 
-当前训练流程全部由 `tools/train.py` 驱动。
+在 `anchor-based` 分支中，训练流程由 `tools/train.py` 驱动。
 
 从宏观流程看，它的训练逻辑可以概括为：
 
@@ -1900,6 +1952,8 @@ refinement 开启时，stage1 和 final 都会被监督。
 - `tools/evaluate.py`
 - `tools/visualize.py`
 
+下面这一步主要详细拆解 `anchor-based` 分支的解码与后处理链路。`row/grid-based` 分支的推理和解码会在步骤 7 中单独总结。
+
 如果说步骤 4 的终点是：
 
 - 获得一个可用的 checkpoint
@@ -2622,9 +2676,11 @@ Converter 会将每条 lane 的有效点：
 
 - `tools/vis_dataset.py`
 - `tools/visualize.py`
+- `tools/visualize_row.py`
 - `tools/plot_loss.py`
 - `tests/test_models.py`
 - `tests/test_losses.py`
+- `tests/test_row_lane_head.py`
 - `outputs/`
 - `configs/`
 - `data/`
@@ -2821,6 +2877,7 @@ Converter 会将每条 lane 的有效点：
 
 - `tests/test_models.py`
 - `tests/test_losses.py`
+- `tests/test_row_lane_head.py`
 
 它们的定位不是完整回归测试，而是最基础的 smoke test。
 
@@ -2858,6 +2915,20 @@ Converter 会将每条 lane 的有效点：
 - 接口改坏
 - shape 对不上
 - loss 直接报错
+
+#### 6.9.3 `test_row_lane_head.py`
+
+这个测试会：
+
+1. 构造简化版 `RowLaneHead`
+2. 输入随机特征图
+3. 检查 `exist_logits` 和 `grid_logits` 的 shape
+4. 检查横向布局变化是否会影响位置分类输出
+
+它主要用于验证：
+
+- row/grid 分支的 Head 接口没有被改坏
+- 位置分类输出仍然真正依赖横向空间结构
 
 ### 6.10 项目目录在完整技术流程中的角色
 
@@ -2911,8 +2982,8 @@ Converter 会将每条 lane 的有效点：
 
 - 数据准备
 - 数据可视化
-- 训练
-- 推理
+- `anchor-based` 训练与推理
+- `row/grid-based` 训练与推理
 - 评估
 - 预测可视化
 - 曲线绘图
@@ -2972,7 +3043,7 @@ Converter 会将每条 lane 的有效点：
 
 这些结果是面向最终性能判断的。
 
-### 6.12 从头到尾一次完整实验怎么跑
+### 6.12 从头到尾一次 Anchor-based 完整实验怎么跑
 
 如果从工程使用角度，把这个项目完整走一遍，典型顺序如下。
 
@@ -3056,11 +3127,11 @@ Converter 会将每条 lane 的有效点：
 - FP / FN 具体出现在哪些图
 - 是否有重复线、抖动、断裂等问题
 
-这 7 步串起来，就是当前项目的完整实验闭环。
+这 7 步串起来，就是 `anchor-based` 分支的一次完整实验闭环。
 
-### 6.13 项目当前技术流程的完整总串联
+### 6.13 Anchor-based 分支的完整总串联
 
-到这里，可以把整个项目的技术流程从头到尾再完整压缩成一条主线：
+到这里，可以把 `anchor-based` 分支的技术流程从头到尾再完整压缩成一条主线：
 
 1. 准备 TuSimple 原始标注和图像
 2. 合并原始标注，生成 `train.json` / `val.json`
@@ -3087,11 +3158,11 @@ Converter 会将每条 lane 的有效点：
 23. 用 `visualize.py` 查看预测结果
 24. 用 `vis_dataset.py` 与 `plot_loss.py` 回查问题并继续迭代
 
-这 24 个环节共同组成了当前项目的完整技术闭环。
+这 24 个环节共同组成了 `anchor-based` 分支的完整技术闭环。
 
-### 6.14 当前项目整体技术路线的总结性判断
+### 6.14 Anchor-based 分支的总结性判断
 
-从整体上看，这个项目属于一种非常明确的：
+从整体上看，`anchor-based` 分支属于一种非常明确的：
 
 - Ray-Anchor-based
 - 固定 y 采样
@@ -3108,7 +3179,7 @@ Converter 会将每条 lane 的有效点：
 - 显式回归每条车道的轨迹偏移
 - 显式做 lane-level NMS 和结构化后处理
 
-因此，这个项目的技术思想从头到尾都比较统一：
+因此，这条分支的技术思想从头到尾都比较统一：
 
 - 把车道线看作“结构化几何曲线”
 - 而不是简单的像素区域
@@ -3125,11 +3196,210 @@ Converter 会将每条 lane 的有效点：
 
 ---
 
+## 步骤 7：两条技术分支的关系与当前 row/grid 主线
+
+这一步解决的问题是：
+
+`在共享数据底座之上，项目为什么会从 anchor-based 路线继续演化出 row/grid-based 路线；两条路线分别解决什么问题；在论文里应该如何定义它们之间的关系`
+
+这一步主要对应的文件为：
+
+- `configs/tusimple_row_res18_fpn.yaml`
+- `lane_det/datasets/row_target_builder.py`
+- `lane_det/models/row_lane_head.py`
+- `lane_det/models/row_lane_detector.py`
+- `tools/train_row.py`
+- `tools/infer_row.py`
+- `tools/visualize_row.py`
+- `tests/test_row_lane_head.py`
+
+如果说步骤 2 到步骤 6 详细展开的是第一条完整工程路线，那么步骤 7 说明的就是：在保留原有数据、骨干网络和评估体系的基础上，项目如何演化出当前重点推进的 row/grid 主线。
+
+### 7.1 为什么会从 Anchor 路线继续分化出新分支
+
+`anchor-based` 路线最早被完整实现出来，因此它在工程上价值很大：
+
+- 它验证了“固定 y 采样的结构化车道线表达”是可行的
+- 它跑通了从数据、训练、推理到 TuSimple 评估的完整闭环
+- 它为项目提供了第一条可复现实验基线
+
+但随着实验深入，这条路线也暴露出明显问题：
+
+- 训练质量对匹配超参数非常敏感
+- 分类、回归、匹配和后处理之间耦合较强
+- 一个改动往往同时改变多个机制，诊断困难
+- 调参成本高，而且很多实验很难给出清晰结论
+
+因此，项目后续没有直接抛弃结构化建模思路，而是保留共享的数据底座和骨干网络，把“车道如何表示、如何监督、如何解码”这一部分重新设计，形成了新的 `row/grid-based` 分支。
+
+### 7.2 两条路线共享什么，分歧点在哪里
+
+两条路线共享的部分包括：
+
+- 同一份 TuSimple 数据和 `train.json` / `val.json`
+- 同一个 `TuSimpleDataset` 与标注解析逻辑
+- 同一套图像增强与缩放归一化
+- 同样的固定 `y_samples=56` 表示
+- 同样的 `ResNet18 + LaneFPN` 特征提取骨架
+- 同样的 `TuSimpleConverter` 与 `LaneEval`
+
+两条路线真正分歧的地方发生在“标准化车道线表示之后”：
+
+- `anchor-based`：先生成 Ray Anchor，再做 Anchor-GT 匹配，最后回归相对 Anchor 的逐点偏移
+- `row/grid-based`：不再生成 Anchor，而是直接把车道整理进固定槽位，并在固定 row 上预测横向位置网格
+
+从论文写作角度，这意味着项目的整体框架可以被表述为：
+
+`共享数据与评估底座 + 两种结构化车道线建模方案`
+
+### 7.3 Row/Grid 分支的数据表示与监督目标
+
+当前 `row/grid-based` 分支的核心配置位于 `configs/tusimple_row_res18_fpn.yaml`，关键参数为：
+
+- 最多预测 `K=5` 条车道
+- 固定 `num_y=56` 个 row
+- 图像宽度离散为 `num_grids=100` 个位置网格
+
+它对应的监督构造由 `lane_det/datasets/row_target_builder.py` 完成。其核心思想是：
+
+1. 先按所有有效点的平均 `x` 对 GT 车道从左到右排序
+2. 最多保留前 `K` 条车道，不足则补空槽位
+3. 为每条槽位生成 `exist`
+4. 为每条槽位生成连续坐标 `x_coords` 和有效点掩码 `coord_mask`
+5. 将连续 `x` 离散到宽度网格上，得到 `grid_targets`
+6. 保留 `row_h_samples`，供后续解码与导出使用
+
+这样一来，任务就从：
+
+`候选 Anchor 分类 + 相对 Anchor 偏移回归`
+
+变成了：
+
+`固定槽位是否存在车道 + 每个 row 上车道位于哪个横向网格`
+
+这条路线最核心的变化是：
+
+- 不再依赖 Anchor 生成
+- 不再依赖 Anchor-GT 匹配
+- 不再依赖 `topk_per_gt` 之类的正样本兜底策略
+
+### 7.4 Row/Grid 分支的模型结构
+
+`row/grid-based` 分支的检测器是 `RowLaneDetector`，结构仍然延续：
+
+- Backbone：`ResNet18`
+- Neck：`LaneFPN`
+- Head：`RowLaneHead`
+
+`RowLaneHead` 的核心流程可以概括为：
+
+1. 对 FPN 输出特征做卷积投影
+2. 通过 `AdaptiveAvgPool2d` 将特征整理成固定的 `row-grid` 布局
+3. 使用 `grid_encoder` 编码二维网格特征
+4. 使用 `row_encoder` 编码逐 row 的上下文
+5. 引入可学习的 `lane_queries` 作为固定槽位的语义查询
+6. 输出：
+   - `exist_logits [B, K]`
+   - `grid_logits [B, K, num_y, num_grids + 1]`
+
+其中 `grid_logits` 的最后一个类别表示：
+
+- 当前 row 没有车道点
+
+因此，这条路线虽然仍然是结构化车道线检测，但它已经不再沿 Anchor 轨迹建模，而是改成了：
+
+- 沿固定 row 做位置分类
+- 再通过期望解码恢复连续横坐标
+
+### 7.5 Row/Grid 分支的训练、推理与可视化
+
+训练脚本 `tools/train_row.py` 主要完成三类损失计算：
+
+- `exist_loss`：`BCEWithLogitsLoss`
+- `grid_loss`：对 `grid_targets` 的 `CrossEntropyLoss`
+- `smooth_loss`：基于期望解码坐标的二阶差分平滑约束
+
+总体损失形式可以概括为：
+
+`loss = exist_weight * exist_loss + grid_weight * grid_loss + diff_weight * smooth_loss`
+
+推理脚本 `tools/infer_row.py` 的核心流程是：
+
+1. 读取 checkpoint
+2. 前向得到 `exist_logits + grid_logits`
+3. 对 `exist_logits` 做 sigmoid，筛掉低分槽位
+4. 对 `grid_logits` 做 softmax
+5. 通过网格概率恢复 `x` 坐标，并用最后一个类别判断某个 row 是否有效
+6. 直接生成车道线字典，再通过 `TuSimpleConverter` 导出
+
+这意味着相较于 `anchor-based` 路线，当前 row/grid 分支在推理阶段显著简化了链路：
+
+- 不需要 Anchor 解码
+- 不需要 Anchor 级匹配回放
+- 不需要把 `anchor_x + offset` 再恢复成车道线
+- 不把 Anchor-NMS 作为主链路的必要步骤
+
+可视化脚本 `tools/visualize_row.py` 用于把 row/grid 分支的预测和 GT 直接叠加检查，从而观察：
+
+- 槽位排序是否稳定
+- 中间车道是否容易偏移
+- 弯道、遮挡和短线场景下的连续性是否足够
+
+### 7.6 当前 Row/Grid 分支的阶段性判断
+
+按照仓库内现有总结文档，当前 row/grid 分支已经从更早期的连续坐标回归版本，演进为统一的网格分类版本。其当前阶段性结论可以概括为：
+
+- 它已经不是“试错失败的分支”
+- 它是当前更值得继续作为主线推进的方案
+- 它在训练收敛性和结构稳定性上，已经明显优于更早期的连续回归版本
+
+现有阶段性记录显示：
+
+- 在完整训练日志中，`epoch 20` 的 best `Accuracy = 0.756733`
+- 同时对应 `FP = 0.578499`
+- `FN = 0.577670`
+- `epoch 19` 的 `FP/FN` 略优，分别为 `0.571133 / 0.570304`
+
+这说明当前主要矛盾已经不是“模型完全训不起来”，而是：
+
+- 结构大体能对上，但仍存在系统性横向偏移
+- 遮挡和中间车道上的局部连续性仍不足
+- 弯道和困难场景下的稳定性还不够成熟
+
+因此，对当前项目更准确的判断不是“row/grid 路线已经最终定型”，而是：
+
+- 它已经成为当前主线
+- 但它仍处在继续优化几何贴线精度和鲁棒性的阶段
+
+### 7.7 在论文中应如何定义两条路线
+
+如果本文档要作为毕业论文的重要依据，建议在论文中把两条路线关系写成下面这种结构：
+
+1. 先介绍共享底座：
+   - TuSimple 固定 `h_samples`
+   - 统一的固定 `y` 采样车道线表示
+   - `ResNet18 + FPN` 特征提取框架
+   - TuSimple 官方指标评估闭环
+2. 再介绍第一阶段方法：
+   - 基于 Ray Anchor 的结构化车道线检测基线
+   - 说明其匹配、回归与后处理设计
+   - 说明它暴露出的超参数敏感和链路耦合问题
+3. 最后介绍当前主线：
+   - 将车道表达重构为固定槽位、固定 row 的横向网格分类
+   - 减少对匹配规则和 Anchor 模板的依赖
+   - 作为当前继续优化与汇报实验结果的主线方案
+
+如果压缩成一段更适合论文方法章节开头的话，可以写成：
+
+`本项目首先实现了一条基于 Ray Anchor 的结构化车道线检测基线，并据此完成了完整的训练、推理与评估闭环；在此基础上，针对 Anchor 匹配敏感、模块耦合较强和诊断成本较高的问题，进一步将车道表示重构为固定 row 上的横向位置网格分类形式，形成了当前重点推进的 row/grid-based 主线方案。`
+
+---
+
 ## 结论：当前项目的完整技术流程
 
-综合前 6 个步骤，当前车道线项目的完整技术流程已经可以完整概括为：
+综合前 7 个步骤，当前车道线项目的完整技术流程应当概括为：
 
-`数据准备 -> 标注解析 -> Ray Anchor 生成与匹配 -> 多尺度特征提取 -> 沿 Ray Anchor 轨迹采样 -> 分类与逐点偏移回归 -> 两阶段细化 -> 多损失联合训练 -> 验证集真实解码评估 -> checkpoint 保存 -> 离线推理 -> lane NMS 与平滑 -> TuSimple 格式导出 -> Accuracy / FP / FN 评估 -> 可视化分析与实验迭代`
+`数据准备 -> 标注解析 -> 固定 y 采样的统一车道线表示 -> 分支 A：Ray Anchor 生成、匹配与偏移回归 / 分支 B：固定槽位、固定 row 的位置网格分类 -> TuSimple 格式导出 -> Accuracy / FP / FN 评估 -> 可视化分析与实验迭代`
 
 这条链路覆盖了：
 
@@ -3142,7 +3412,13 @@ Converter 会将每条 lane 的有效点：
 - 评估层
 - 工程管理层
 
-到这里，这个项目从头到尾的完整技术流程已经整理闭环。
+如果进一步按论文口径压缩，当前项目最合理的定位应当是：
+
+- 项目共享一套统一的数据、特征提取和评估底座
+- `anchor-based` 路线是最早完成的结构化检测基线
+- `row/grid-based` 路线是当前重点推进的主线方案
+
+到这里，这个项目从头到尾的完整技术流程，以及两条技术分支之间的关系，已经可以形成一个适合论文引用的闭环表述。
 
 ## 文档维护说明
 
@@ -3151,5 +3427,6 @@ Converter 会将每条 lane 的有效点：
 - 不同配置版本的演化对比
 - Anchor 匹配策略版本差异
 - refinement 模块迭代记录
+- row/grid 分支的持续优化记录
 - 后处理参数调优经验
 - 与其他车道线方法的对比分析

@@ -8,6 +8,7 @@ import time
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import yaml
 from torch.optim.lr_scheduler import MultiStepLR
@@ -108,7 +109,7 @@ def build_collate_fn(target_builder):
 
 
 def compute_expected_x(grid_logits, num_grids):
-    coord_prob = torch.softmax(grid_logits[..., :num_grids], dim=-1)
+    coord_prob = torch.softmax(grid_logits, dim=-1)
     grid_indices = torch.arange(num_grids, device=grid_logits.device, dtype=torch.float32)
     expected_grid = (coord_prob * grid_indices).sum(dim=-1)
     return expected_grid / max(float(num_grids - 1), 1.0)
@@ -128,13 +129,20 @@ def compute_smoothness_loss(pred, target, mask):
     return loss.sum() / diff_mask.sum().clamp(min=1.0)
 
 
-def decode_row_predictions(exist_logits, grid_logits, row_h_samples, score_thr, img_w, num_grids):
+def compute_masked_grid_loss(grid_logits, grid_targets):
+    flat_logits = grid_logits.reshape(-1, grid_logits.shape[-1])
+    flat_targets = grid_targets.reshape(-1)
+    valid_mask = flat_targets >= 0
+    if not torch.any(valid_mask):
+        return grid_logits.sum() * 0.0
+    return F.cross_entropy(flat_logits[valid_mask], flat_targets[valid_mask])
+
+
+def decode_row_predictions(exist_logits, row_valid_logits, grid_logits, row_h_samples, score_thr, row_valid_thr, img_w, num_grids):
     exist_scores = torch.sigmoid(exist_logits)
-    prob = torch.softmax(grid_logits, dim=-1)
-    point_class = prob.argmax(dim=-1)
-    valid_mask = (point_class != num_grids).to(torch.uint8)
-    coord_prob = prob[..., :num_grids]
-    coord_prob = coord_prob / coord_prob.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+    row_valid_scores = torch.sigmoid(row_valid_logits)
+    valid_mask = (row_valid_scores >= row_valid_thr).to(torch.uint8)
+    coord_prob = torch.softmax(grid_logits, dim=-1)
     grid_indices = torch.arange(num_grids, device=grid_logits.device, dtype=torch.float32)
     expected_grid = (coord_prob * grid_indices).sum(dim=-1)
     x_coords = expected_grid / max(float(num_grids - 1), 1.0)
@@ -155,6 +163,7 @@ def decode_row_predictions(exist_logits, grid_logits, row_h_samples, score_thr, 
 def validate(model, loader, samples, cfg, device):
     model.eval()
     score_thr = float(cfg.get("eval", {}).get("exist_score_thr", 0.5))
+    row_valid_thr = float(cfg.get("eval", {}).get("row_valid_score_thr", 0.5))
     converter = TuSimpleConverter()
     gt_map = {item["raw_file"]: item for item in samples}
     total_acc = 0.0
@@ -168,8 +177,17 @@ def validate(model, loader, samples, cfg, device):
             images = batch["images"].to(device)
             row_h_samples = batch["row_h_samples"].to(device)
             metas = batch["metas"]
-            exist_logits, grid_logits = model(images)
-            decoded_batch = decode_row_predictions(exist_logits, grid_logits, row_h_samples, score_thr, images.shape[-1], model.head.num_grids)
+            exist_logits, row_valid_logits, grid_logits = model(images)
+            decoded_batch = decode_row_predictions(
+                exist_logits,
+                row_valid_logits,
+                grid_logits,
+                row_h_samples,
+                score_thr,
+                row_valid_thr,
+                images.shape[-1],
+                model.head.num_grids,
+            )
             img_h, img_w = images.shape[-2:]
             for lane_dicts, meta in zip(decoded_batch, metas):
                 gt = gt_map.get(meta["raw_file"])
@@ -230,8 +248,9 @@ def main():
     scheduler = MultiStepLR(optimizer, milestones=cfg["train"].get("lr_milestones", [12, 18]), gamma=cfg["train"].get("lr_gamma", 0.3))
 
     exist_criterion = nn.BCEWithLogitsLoss()
-    grid_criterion = nn.CrossEntropyLoss()
+    row_valid_criterion = nn.BCEWithLogitsLoss()
     exist_weight = float(cfg.get("loss", {}).get("exist_weight", 1.0))
+    row_valid_weight = float(cfg.get("loss", {}).get("row_valid_weight", 1.0))
     grid_weight = float(cfg.get("loss", {}).get("grid_weight", 1.0))
     diff_weight = float(cfg.get("loss", {}).get("diff_weight", 0.0))
 
@@ -252,6 +271,7 @@ def main():
         model.train()
         epoch_loss = 0.0
         epoch_exist_loss = 0.0
+        epoch_row_valid_loss = 0.0
         epoch_grid_loss = 0.0
         epoch_smooth_loss = 0.0
         start_time = time.time()
@@ -266,17 +286,24 @@ def main():
             grid_targets = batch["grid_targets"].to(device)
 
             optimizer.zero_grad()
-            exist_logits, grid_logits = model(images)
+            exist_logits, row_valid_logits, grid_logits = model(images)
             exist_loss = exist_criterion(exist_logits, exist_targets)
-            grid_loss = grid_criterion(grid_logits.view(-1, model.head.num_grids + 1), grid_targets.view(-1))
+            row_valid_loss = row_valid_criterion(row_valid_logits, coord_masks)
+            grid_loss = compute_masked_grid_loss(grid_logits, grid_targets)
             expected_x_norm = compute_expected_x(grid_logits, model.head.num_grids)
             smooth_loss = compute_smoothness_loss(expected_x_norm, x_targets_norm, coord_masks)
-            loss = exist_weight * exist_loss + grid_weight * grid_loss + diff_weight * smooth_loss
+            loss = (
+                exist_weight * exist_loss
+                + row_valid_weight * row_valid_loss
+                + grid_weight * grid_loss
+                + diff_weight * smooth_loss
+            )
             loss.backward()
             optimizer.step()
 
             epoch_loss += float(loss.item())
             epoch_exist_loss += float(exist_loss.item())
+            epoch_row_valid_loss += float(row_valid_loss.item())
             epoch_grid_loss += float(grid_loss.item())
             epoch_smooth_loss += float(smooth_loss.item())
 
@@ -284,7 +311,8 @@ def main():
                 logger.info(
                     f"Epoch [{epoch+1}/{num_epochs}], Step [{step}/{len(train_loader)}], "
                     f"Loss: {loss.item():.4f} "
-                    f"(Exist: {exist_loss.item():.4f}, Grid: {grid_loss.item():.4f}, Smooth: {smooth_loss.item():.4f})"
+                    f"(Exist: {exist_loss.item():.4f}, RowValid: {row_valid_loss.item():.4f}, "
+                    f"Grid: {grid_loss.item():.4f}, Smooth: {smooth_loss.item():.4f})"
                 )
 
         denom = max(len(train_loader), 1)
@@ -292,7 +320,8 @@ def main():
         logger.info(
             f"Epoch [{epoch+1}/{num_epochs}] Finished. Time: {elapsed:.2f}s. "
             f"Avg Loss: {epoch_loss / denom:.4f} "
-            f"(Exist: {epoch_exist_loss / denom:.4f}, Grid: {epoch_grid_loss / denom:.4f}, Smooth: {epoch_smooth_loss / denom:.4f})"
+            f"(Exist: {epoch_exist_loss / denom:.4f}, RowValid: {epoch_row_valid_loss / denom:.4f}, "
+            f"Grid: {epoch_grid_loss / denom:.4f}, Smooth: {epoch_smooth_loss / denom:.4f})"
         )
 
         val_metrics = validate(model, val_loader, val_dataset.samples, cfg, device)

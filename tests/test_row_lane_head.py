@@ -26,10 +26,11 @@ class TestRowLaneHead(unittest.TestCase):
         head = RowLaneHead(in_channels=8, num_lanes=5, num_y=56, hidden_dim=16, dropout=0.0, num_grids=100)
         feat = torch.randn(2, 8, 20, 40)
 
-        exist_logits, grid_logits = head(feat)
+        exist_logits, row_valid_logits, grid_logits = head(feat)
 
         self.assertEqual(exist_logits.shape, (2, 5))
-        self.assertEqual(grid_logits.shape, (2, 5, 56, 101))
+        self.assertEqual(row_valid_logits.shape, (2, 5, 56))
+        self.assertEqual(grid_logits.shape, (2, 5, 56, 100))
 
     def test_horizontal_layout_affects_grid_logits(self):
         head = RowLaneHead(in_channels=1, num_lanes=1, num_y=2, hidden_dim=1, dropout=0.0, num_grids=4)
@@ -53,8 +54,8 @@ class TestRowLaneHead(unittest.TestCase):
                [0.0, 0.0, 1.0, 1.0]]]]
         )
 
-        _, left_logits = head(left_heavy)
-        _, right_logits = head(right_heavy)
+        _, _, left_logits = head(left_heavy)
+        _, _, right_logits = head(right_heavy)
 
         self.assertFalse(torch.allclose(left_logits[..., :4], right_logits[..., :4]))
 

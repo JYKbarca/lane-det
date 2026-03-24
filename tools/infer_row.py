@@ -69,6 +69,7 @@ def main():
     parser.add_argument("--out", type=str, default=None, help="Output json path")
     parser.add_argument("--split", type=str, choices=["train", "val", "test"], default=None, help="Dataset split")
     parser.add_argument("--exist_score_thr", type=float, default=None, help="Existence threshold override")
+    parser.add_argument("--row_valid_score_thr", type=float, default=None, help="Row-valid threshold override")
     args = parser.parse_args()
 
     with open(args.cfg, "r", encoding="utf-8") as f:
@@ -82,6 +83,11 @@ def main():
         float(args.exist_score_thr)
         if args.exist_score_thr is not None
         else float(cfg.get("eval", {}).get("exist_score_thr", 0.5))
+    )
+    row_valid_thr = (
+        float(args.row_valid_score_thr)
+        if args.row_valid_score_thr is not None
+        else float(cfg.get("eval", {}).get("row_valid_score_thr", 0.5))
     )
 
     split = args.split
@@ -134,12 +140,14 @@ def main():
             row_h_samples = batch["row_h_samples"].to(device)
             metas = batch["metas"]
 
-            exist_logits, grid_logits = model(images)
+            exist_logits, row_valid_logits, grid_logits = model(images)
             decoded_batch = decode_row_predictions(
                 exist_logits,
+                row_valid_logits,
                 grid_logits,
                 row_h_samples,
                 score_thr,
+                row_valid_thr,
                 images.shape[-1],
                 model.head.num_grids,
             )

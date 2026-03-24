@@ -41,7 +41,7 @@ class RowLaneHead(nn.Module):
             nn.Dropout(p=dropout),
         )
         self.exist_head = nn.Linear(hidden_dim, 1)
-        self.no_lane_head = nn.Linear(hidden_dim, 1)
+        self.row_valid_head = nn.Linear(hidden_dim, 1)
 
     def forward(self, feature_map):
         feat = self.proj(feature_map)
@@ -60,8 +60,7 @@ class RowLaneHead(nn.Module):
 
         exist_context = lane_feat.mean(dim=2)
         exist_logits = self.exist_head(exist_context).squeeze(-1)
+        row_valid_logits = self.row_valid_head(lane_feat).squeeze(-1)
 
         position_logits = torch.einsum("bkyh,bhyg->bkyg", lane_feat, grid_feat) * self.score_scale
-        no_lane_logits = self.no_lane_head(lane_feat).squeeze(-1)
-        grid_logits = torch.cat([position_logits, no_lane_logits.unsqueeze(-1)], dim=-1)
-        return exist_logits, grid_logits
+        return exist_logits, row_valid_logits, position_logits

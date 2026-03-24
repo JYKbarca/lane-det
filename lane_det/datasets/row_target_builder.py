@@ -23,7 +23,7 @@ class RowTargetBuilder:
         exist = np.zeros((self.num_lanes,), dtype=np.float32)
         x_coords = np.zeros((self.num_lanes, self.num_y), dtype=np.float32)
         coord_mask = np.zeros((self.num_lanes, self.num_y), dtype=np.float32)
-        grid_targets = np.full((self.num_lanes, self.num_y), self.num_grids, dtype=np.int64)
+        grid_targets = np.full((self.num_lanes, self.num_y), -1, dtype=np.int64)
 
         if lanes.ndim == 1:
             lanes = lanes[None, :]
