@@ -3,10 +3,11 @@ import torch.nn as nn
 
 
 class RowLaneHead(nn.Module):
-    def __init__(self, in_channels, num_lanes=5, num_y=56, hidden_dim=256, dropout=0.1):
+    def __init__(self, in_channels, num_lanes=5, num_y=56, hidden_dim=256, dropout=0.1, num_grids=100):
         super().__init__()
         self.num_lanes = int(num_lanes)
         self.num_y = int(num_y)
+        self.num_grids = int(num_grids)
 
         self.proj = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False),
@@ -31,8 +32,7 @@ class RowLaneHead(nn.Module):
             nn.Dropout(p=dropout),
         )
         self.exist_head = nn.Linear(hidden_dim, 1)
-        self.coord_head = nn.Linear(hidden_dim, 1)
-        self.valid_head = nn.Linear(hidden_dim, 1)
+        self.grid_head = nn.Linear(hidden_dim, self.num_grids + 1)
 
     def forward(self, feature_map):
         feat = self.proj(feature_map)
@@ -49,6 +49,5 @@ class RowLaneHead(nn.Module):
 
         exist_context = lane_feat.mean(dim=2)
         exist_logits = self.exist_head(exist_context).squeeze(-1)
-        valid_logits = self.valid_head(lane_feat).squeeze(-1)
-        x_coords = torch.sigmoid(self.coord_head(lane_feat).squeeze(-1))
-        return exist_logits, valid_logits, x_coords
+        grid_logits = self.grid_head(lane_feat)
+        return exist_logits, grid_logits

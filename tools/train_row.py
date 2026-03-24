@@ -98,6 +98,7 @@ def build_collate_fn(target_builder):
                 sample["lanes"],
                 sample["valid_mask"],
                 sample["meta"].get("h_samples", []),
+                img_width
             )
             for sample in batch
         ]
@@ -111,6 +112,9 @@ def build_collate_fn(target_builder):
         coord_masks = torch.stack(
             [torch.from_numpy(target["coord_mask"]).float() for target in row_targets]
         )
+        grid_targets = torch.stack(
+            [torch.from_numpy(target["grid_targets"]).long() for target in row_targets]
+        )
         row_h_samples = torch.stack(
             [torch.from_numpy(target["row_h_samples"]).float() for target in row_targets]
         )
@@ -123,6 +127,7 @@ def build_collate_fn(target_builder):
             "x_targets": x_targets,
             "x_targets_norm": x_targets_norm,
             "coord_masks": coord_masks,
+            "grid_targets": grid_targets,
             "row_h_samples": row_h_samples,
             "metas": [sample.get("meta", {}) for sample in batch],
         }
@@ -146,33 +151,72 @@ def masked_smooth_l1_loss(pred, target, mask, beta=1.0):
     return weighted.sum() / denom
 
 
-def compute_smoothness_loss(pred, target, mask):
-    # Compute first-order differences along the y-axis (dim=2)
-    pred_diff = pred[:, :, 1:] - pred[:, :, :-1]
-    target_diff = target[:, :, 1:] - target[:, :, :-1]
+def compute_expected_x(grid_logits, num_grids):
+    # grid_logits: [B, num_lanes, num_y, num_grids + 1]
+    # We only care about the first num_grids columns for the continuous x
+    coord_logits = grid_logits[..., :num_grids]
+    prob = torch.softmax(coord_logits, dim=-1)
     
-    # A difference is valid only if both adjacent rows are valid
-    diff_mask = mask[:, :, 1:] * mask[:, :, :-1]
+    # Create grid indices [0, 1, ..., num_grids - 1]
+    grid_indices = torch.arange(num_grids, device=grid_logits.device, dtype=torch.float32)
+    
+    # Expected value: sum(prob * index)
+    expected_grid = (prob * grid_indices).sum(dim=-1)
+    
+    # Normalize to [0, 1]
+    expected_x_norm = expected_grid / max(float(num_grids - 1), 1.0)
+    return expected_x_norm
+
+def compute_smoothness_loss(pred, target, mask):
+    # Compute second-order differences along the y-axis (dim=2)
+    if pred.shape[2] < 3:
+        return pred.sum() * 0.0
+        
+    pred_diff1 = pred[:, :, 1:] - pred[:, :, :-1]
+    pred_diff2 = pred_diff1[:, :, 1:] - pred_diff1[:, :, :-1]
+    
+    target_diff1 = target[:, :, 1:] - target[:, :, :-1]
+    target_diff2 = target_diff1[:, :, 1:] - target_diff1[:, :, :-1]
+    
+    # A second-order difference is valid only if all 3 adjacent rows are valid
+    diff_mask = mask[:, :, 2:] * mask[:, :, 1:-1] * mask[:, :, :-2]
     
     if diff_mask.sum() == 0:
         return pred.sum() * 0.0
         
-    loss = torch.abs(pred_diff - target_diff) * diff_mask
+    loss = torch.abs(pred_diff2 - target_diff2) * diff_mask
     return loss.sum() / diff_mask.sum().clamp(min=1.0)
 
 
-def decode_row_predictions(exist_logits, valid_logits, x_coords_norm, row_h_samples, score_thr, img_w, valid_thr):
+def decode_row_predictions(exist_logits, grid_logits, row_h_samples, score_thr, img_w, num_grids):
     exist_scores = torch.sigmoid(exist_logits)
-    valid_scores = torch.sigmoid(valid_logits)
+    
+    # grid_logits: [B, num_lanes, num_y, num_grids + 1]
+    prob = torch.softmax(grid_logits, dim=-1)
+    
+    # The last class is the "invalid/background" class
+    valid_prob = 1.0 - prob[..., num_grids]
+    
+    # Expected continuous x
+    coord_prob = prob[..., :num_grids]
+    # Re-normalize probabilities over the spatial grids
+    coord_prob = coord_prob / (coord_prob.sum(dim=-1, keepdim=True) + 1e-6)
+    
+    grid_indices = torch.arange(num_grids, device=grid_logits.device, dtype=torch.float32)
+    expected_grid = (coord_prob * grid_indices).sum(dim=-1)
+    x_coords_norm = expected_grid / max(float(num_grids - 1), 1.0)
+    
     lanes_batch = []
     x_coords = x_coords_norm * max(float(img_w) - 1.0, 1.0)
 
-    for scores_b, valid_b, coords_b, ys_b in zip(exist_scores, valid_scores, x_coords, row_h_samples):
+    for scores_b, valid_b, coords_b, ys_b in zip(exist_scores, valid_prob, x_coords, row_h_samples):
         lane_dicts = []
         for lane_score, lane_valid, lane_xs in zip(scores_b, valid_b, coords_b):
             if float(lane_score) < score_thr:
                 continue
-            valid_mask = (lane_valid >= valid_thr).to(torch.uint8)
+            
+            # A point is valid if the probability of not being background is > 0.5
+            valid_mask = (lane_valid > 0.5).to(torch.uint8)
             if int(valid_mask.sum()) < 2:
                 continue
             lane_dicts.append(
@@ -208,15 +252,14 @@ def validate(model, loader, samples, cfg, device):
             row_h_samples = batch["row_h_samples"].to(device)
             metas = batch["metas"]
 
-            exist_logits, valid_logits, x_coords_norm = model(images)
+            exist_logits, grid_logits = model(images)
             decoded_batch = decode_row_predictions(
                 exist_logits,
-                valid_logits,
-                x_coords_norm,
+                grid_logits,
                 row_h_samples,
                 score_thr,
                 images.shape[-1],
-                valid_thr,
+                model.head.num_grids,
             )
             img_h, img_w = images.shape[-2:]
 
@@ -391,7 +434,7 @@ def main():
                 logger.info(
                     f"Epoch [{epoch+1}/{num_epochs}], Step [{step}/{len(train_loader)}], "
                     f"Loss: {loss.item():.4f} "
-                    f"(Exist: {exist_loss.item():.4f}, Coord: {coord_loss.item():.4f}, Valid: {valid_loss.item():.4f}, Smooth: {smooth_loss.item():.4f}, QueryReg: {query_reg_loss.item():.4f})"
+                    f"(Exist: {exist_loss.item():.4f}, Grid: {grid_loss.item():.4f}, Coord: {coord_loss.item():.4f}, Smooth: {smooth_loss.item():.4f}, QueryReg: {query_reg_loss.item():.4f})"
                 )
 
         elapsed = time.time() - start_time
@@ -399,7 +442,7 @@ def main():
         logger.info(
             f"Epoch [{epoch+1}/{num_epochs}] Finished. Time: {elapsed:.2f}s. "
             f"Avg Loss: {epoch_loss / denom:.4f} "
-            f"(Exist: {epoch_exist_loss / denom:.4f}, Coord: {epoch_coord_loss / denom:.4f}, Valid: {epoch_valid_loss / denom:.4f}, Smooth: {epoch_smooth_loss / denom:.4f})"
+            f"(Exist: {epoch_exist_loss / denom:.4f}, Grid: {epoch_valid_loss / denom:.4f}, Coord: {epoch_coord_loss / denom:.4f}, Smooth: {epoch_smooth_loss / denom:.4f})"
         )
 
         val_metrics = validate(model, val_loader, val_dataset.samples, cfg, device)

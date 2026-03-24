@@ -39,11 +39,13 @@ def build_collate_fn(target_builder):
             return None
 
         images = torch.stack([torch.from_numpy(sample["image"]).float() for sample in batch])
+        img_width = float(images.shape[-1])
         row_targets = [
             target_builder.build(
                 sample["lanes"],
                 sample["valid_mask"],
                 sample["meta"].get("h_samples", []),
+                img_width
             )
             for sample in batch
         ]
@@ -80,7 +82,6 @@ def main():
         if args.exist_score_thr is not None
         else float(cfg.get("eval", {}).get("exist_score_thr", 0.5))
     )
-    valid_thr = float(cfg.get("eval", {}).get("valid_thr", 0.5))
 
     split = args.split
     if split is None:
@@ -115,7 +116,13 @@ def main():
 
     model = RowLaneDetector(infer_cfg).to(device)
     checkpoint = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(checkpoint["model"] if "model" in checkpoint else checkpoint)
+    
+    # Handle missing num_grids in checkpoint for backward compatibility
+    state_dict = checkpoint["model"] if "model" in checkpoint else checkpoint
+    if "head.grid_head.weight" not in state_dict and "head.coord_head.weight" in state_dict:
+        print("Warning: Loading old checkpoint into new grid-based model. This will likely fail or perform poorly.")
+        
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
 
     converter = TuSimpleConverter()
@@ -130,15 +137,14 @@ def main():
             row_h_samples = batch["row_h_samples"].to(device)
             metas = batch["metas"]
 
-            exist_logits, valid_logits, x_coords_norm = model(images)
+            exist_logits, grid_logits = model(images)
             decoded_batch = decode_row_predictions(
                 exist_logits,
-                valid_logits,
-                x_coords_norm,
+                grid_logits,
                 row_h_samples,
                 score_thr,
                 images.shape[-1],
-                valid_thr,
+                model.head.num_grids,
             )
 
             img_h, img_w = images.shape[-2:]

@@ -26,6 +26,7 @@ class RowLaneDetector(nn.Module):
             num_y=row_cfg.get("num_y", cfg["dataset"]["y_samples"]),
             hidden_dim=model_cfg.get("row_hidden_dim", 256),
             dropout=model_cfg.get("row_dropout", 0.1),
+            num_grids=row_cfg.get("num_grids", 100),
         )
 
     def forward(self, images):
