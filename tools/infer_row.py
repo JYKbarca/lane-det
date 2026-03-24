@@ -77,6 +77,7 @@ def main():
     row_cfg = cfg.setdefault("row", {})
     row_cfg.setdefault("max_lanes", 5)
     row_cfg.setdefault("num_y", int(cfg["dataset"]["y_samples"]))
+    row_cfg.setdefault("num_grids", 100)
     score_thr = (
         float(args.exist_score_thr)
         if args.exist_score_thr is not None
@@ -101,6 +102,7 @@ def main():
     target_builder = RowTargetBuilder(
         num_lanes=row_cfg["max_lanes"],
         num_y=row_cfg["num_y"],
+        num_grids=row_cfg["num_grids"],
     )
     dataset = TuSimpleDataset(infer_cfg, split=split)
     loader = DataLoader(
@@ -116,13 +118,8 @@ def main():
 
     model = RowLaneDetector(infer_cfg).to(device)
     checkpoint = torch.load(args.ckpt, map_location=device)
-    
-    # Handle missing num_grids in checkpoint for backward compatibility
     state_dict = checkpoint["model"] if "model" in checkpoint else checkpoint
-    if "head.grid_head.weight" not in state_dict and "head.coord_head.weight" in state_dict:
-        print("Warning: Loading old checkpoint into new grid-based model. This will likely fail or perform poorly.")
-        
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(state_dict)
     model.eval()
 
     converter = TuSimpleConverter()

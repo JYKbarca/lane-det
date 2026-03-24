@@ -14,6 +14,7 @@ paths:
 row:
   max_lanes: 5
   num_y: 56
+  num_grids: 100
 
 model:
   backbone: resnet18
@@ -22,12 +23,9 @@ model:
   row_dropout: 0.1
 
 loss:
-  smooth_l1_beta: 1.0
   exist_weight: 1.0
-  coord_weight: 1.0
-  valid_weight: 1.0
+  grid_weight: 1.0
   diff_weight: 0.2
-  query_reg_weight: 0.0
 
 train:
   batch_size: 4
@@ -39,7 +37,6 @@ train:
 
 eval:
   exist_score_thr: 0.7
-  valid_thr: 0.5
 
 augmentation:
   flip_p: 0.5
