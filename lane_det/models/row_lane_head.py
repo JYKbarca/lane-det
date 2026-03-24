@@ -21,7 +21,11 @@ class RowLaneHead(nn.Module):
             nn.Dropout(p=dropout),
         )
         self.lane_queries = nn.Parameter(torch.randn(self.num_lanes, hidden_dim))
+        fusion_dim = hidden_dim * 3
         self.fuse = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(p=dropout),
@@ -35,8 +39,12 @@ class RowLaneHead(nn.Module):
         row_feat = self.row_pool(feat).squeeze(-1)
         row_feat = self.row_encoder(row_feat).transpose(1, 2)
 
-        lane_queries = self.lane_queries.unsqueeze(0).unsqueeze(2)
-        lane_feat = row_feat.unsqueeze(1) + lane_queries
+        B, num_y, C = row_feat.shape
+        lane_queries = self.lane_queries.unsqueeze(0).unsqueeze(2).expand(B, self.num_lanes, num_y, C)
+        row_feat_expanded = row_feat.unsqueeze(1).expand(B, self.num_lanes, num_y, C)
+
+        interaction = row_feat_expanded * lane_queries
+        lane_feat = torch.cat([row_feat_expanded, lane_queries, interaction], dim=-1)
         lane_feat = self.fuse(lane_feat)
 
         exist_context = lane_feat.mean(dim=2)

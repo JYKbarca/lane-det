@@ -353,7 +353,11 @@ def main():
             valid_loss = (valid_loss_unreduced * exist_targets.unsqueeze(-1)).sum() / (exist_targets.sum().clamp(min=1.0) * valid_logits.shape[-1])
             
             coord_loss = masked_smooth_l1_loss(x_coords_norm, x_targets_norm, lane_masks, beta=coord_beta)
-            loss = exist_weight * exist_loss + coord_weight * coord_loss + valid_weight * valid_loss
+            
+            # Add L1 regularization for lane_queries to encourage differentiation
+            query_reg_loss = 0.01 * torch.mean(torch.abs(model.head.lane_queries))
+            
+            loss = exist_weight * exist_loss + coord_weight * coord_loss + valid_weight * valid_loss + query_reg_loss
 
             loss.backward()
             optimizer.step()
@@ -367,7 +371,7 @@ def main():
                 logger.info(
                     f"Epoch [{epoch+1}/{num_epochs}], Step [{step}/{len(train_loader)}], "
                     f"Loss: {loss.item():.4f} "
-                    f"(Exist: {exist_loss.item():.4f}, Coord: {coord_loss.item():.4f}, Valid: {valid_loss.item():.4f})"
+                    f"(Exist: {exist_loss.item():.4f}, Coord: {coord_loss.item():.4f}, Valid: {valid_loss.item():.4f}, QueryReg: {query_reg_loss.item():.4f})"
                 )
 
         elapsed = time.time() - start_time

@@ -47,3 +47,6 @@ python tools/infer_row.py --cfg configs/tusimple_row_res18_fpn.yaml --ckpt /root
 
 
 python tools/visualize_row.py --pred /root/autodl-tmp/outputs/row-based/row_val.json --cfg configs/tusimple_row_res18_fpn.yaml --gt /root/autodl-tmp/datasets/archive/TUSimple/train_set/val.json --out /root/autodl-tmp/outputs/row-based/vis --num 20
+
+
+python tools/train_row.py --cfg configs/tusimple_row_res18_fpn.yaml
