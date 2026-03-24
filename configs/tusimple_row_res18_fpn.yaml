@@ -26,8 +26,8 @@ loss:
   exist_weight: 1.0
   coord_weight: 1.0
   valid_weight: 1.0
-  diff_weight: 1.0
-  query_reg_weight: 0.01
+  diff_weight: 0.2
+  query_reg_weight: 0.0
 
 train:
   batch_size: 4
