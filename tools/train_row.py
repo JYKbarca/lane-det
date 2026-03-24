@@ -146,6 +146,21 @@ def masked_smooth_l1_loss(pred, target, mask, beta=1.0):
     return weighted.sum() / denom
 
 
+def compute_smoothness_loss(pred, target, mask):
+    # Compute first-order differences along the y-axis (dim=2)
+    pred_diff = pred[:, :, 1:] - pred[:, :, :-1]
+    target_diff = target[:, :, 1:] - target[:, :, :-1]
+    
+    # A difference is valid only if both adjacent rows are valid
+    diff_mask = mask[:, :, 1:] * mask[:, :, :-1]
+    
+    if diff_mask.sum() == 0:
+        return pred.sum() * 0.0
+        
+    loss = torch.abs(pred_diff - target_diff) * diff_mask
+    return loss.sum() / diff_mask.sum().clamp(min=1.0)
+
+
 def decode_row_predictions(exist_logits, valid_logits, x_coords_norm, row_h_samples, score_thr, img_w, valid_thr):
     exist_scores = torch.sigmoid(exist_logits)
     valid_scores = torch.sigmoid(valid_logits)
@@ -310,6 +325,8 @@ def main():
     exist_weight = float(cfg.get("loss", {}).get("exist_weight", 1.0))
     coord_weight = float(cfg.get("loss", {}).get("coord_weight", 1.0))
     valid_weight = float(cfg.get("loss", {}).get("valid_weight", 1.0))
+    diff_weight = float(cfg.get("loss", {}).get("diff_weight", 1.0))
+    query_reg_weight = float(cfg.get("loss", {}).get("query_reg_weight", 0.01))
 
     start_epoch = 0
     best_acc = float("-inf")
@@ -332,6 +349,7 @@ def main():
         epoch_exist_loss = 0.0
         epoch_coord_loss = 0.0
         epoch_valid_loss = 0.0
+        epoch_smooth_loss = 0.0
         start_time = time.time()
 
         for step, batch in enumerate(train_loader):
@@ -353,11 +371,12 @@ def main():
             valid_loss = (valid_loss_unreduced * exist_targets.unsqueeze(-1)).sum() / (exist_targets.sum().clamp(min=1.0) * valid_logits.shape[-1])
             
             coord_loss = masked_smooth_l1_loss(x_coords_norm, x_targets_norm, lane_masks, beta=coord_beta)
+            smooth_loss = compute_smoothness_loss(x_coords_norm, x_targets_norm, lane_masks)
             
             # Add L1 regularization for lane_queries to encourage differentiation
-            query_reg_loss = 0.01 * torch.mean(torch.abs(model.head.lane_queries))
+            query_reg_loss = query_reg_weight * torch.mean(torch.abs(model.head.lane_queries))
             
-            loss = exist_weight * exist_loss + coord_weight * coord_loss + valid_weight * valid_loss + query_reg_loss
+            loss = exist_weight * exist_loss + coord_weight * coord_loss + valid_weight * valid_loss + diff_weight * smooth_loss + query_reg_loss
 
             loss.backward()
             optimizer.step()
@@ -366,12 +385,13 @@ def main():
             epoch_exist_loss += float(exist_loss.item())
             epoch_coord_loss += float(coord_loss.item())
             epoch_valid_loss += float(valid_loss.item())
+            epoch_smooth_loss += float(smooth_loss.item())
 
             if step % 10 == 0:
                 logger.info(
                     f"Epoch [{epoch+1}/{num_epochs}], Step [{step}/{len(train_loader)}], "
                     f"Loss: {loss.item():.4f} "
-                    f"(Exist: {exist_loss.item():.4f}, Coord: {coord_loss.item():.4f}, Valid: {valid_loss.item():.4f}, QueryReg: {query_reg_loss.item():.4f})"
+                    f"(Exist: {exist_loss.item():.4f}, Coord: {coord_loss.item():.4f}, Valid: {valid_loss.item():.4f}, Smooth: {smooth_loss.item():.4f}, QueryReg: {query_reg_loss.item():.4f})"
                 )
 
         elapsed = time.time() - start_time
@@ -379,7 +399,7 @@ def main():
         logger.info(
             f"Epoch [{epoch+1}/{num_epochs}] Finished. Time: {elapsed:.2f}s. "
             f"Avg Loss: {epoch_loss / denom:.4f} "
-            f"(Exist: {epoch_exist_loss / denom:.4f}, Coord: {epoch_coord_loss / denom:.4f}, Valid: {epoch_valid_loss / denom:.4f})"
+            f"(Exist: {epoch_exist_loss / denom:.4f}, Coord: {epoch_coord_loss / denom:.4f}, Valid: {epoch_valid_loss / denom:.4f}, Smooth: {epoch_smooth_loss / denom:.4f})"
         )
 
         val_metrics = validate(model, val_loader, val_dataset.samples, cfg, device)
