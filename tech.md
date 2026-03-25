@@ -490,7 +490,7 @@ Anchor 集只依赖这些固定因素：
 
 - `anchor-based` 分支主要包含：
   - `images`
-  - `cls_labels`
+  - `cls_targets`
   - `offset_labels`
   - `offset_masks`
   - `anchors`
@@ -546,7 +546,7 @@ Anchor 集只依赖这些固定因素：
 
 完整链路可以概括成：
 
-`images -> ResNet18 提取多层特征 -> FPN 融合成多尺度金字塔特征 -> 沿 Ray Anchor 轨迹池化特征 -> 分类头输出每条 Anchor 的存在分数 -> 回归头输出每条 Anchor 在各 y 位置上的偏移量`
+`images -> ResNet18 提取多层特征 -> FPN 融合成多尺度金字塔特征 -> 沿 Ray Anchor 轨迹池化特征 -> 分类头输出每条 Anchor 的质量感知分类分数 -> 回归头输出每条 Anchor 在各 y 位置上的偏移量`
 
 如果启用 refinement，则回归部分还会多一层：
 
@@ -558,7 +558,7 @@ Anchor 集只依赖这些固定因素：
 
 - `images`：`[B, 3, H, W]`
 - `anchors`：AnchorSet 对象
-- `cls_labels`
+- `cls_targets`
 - `offset_labels`
 - `offset_masks`
 
@@ -875,58 +875,66 @@ Pooler 内部使用的是 `torch.nn.functional.grid_sample`。
 
 ### 3.9 分类分支是怎么做的
 
-分类分支的目标是判断：
+直观上，分类分支在判断：
 
-“当前 Anchor 是否对应一条真实车道线。”
+“当前 Anchor 是否成线、是否值得保留。”
+
+但更准确地说，当前实现不是输出一个纯二值存在概率，而是为每条 Anchor 预测一个质量感知的分类分数，用来衡量它与 GT 的匹配质量；这个分数在推理时会作为筛选和排序依据。
 
 #### 3.9.1 输入特征来自哪里
 
-分类分支并不是直接使用整条序列做复杂时序建模，而是先对 y 维做聚合。
+分类分支并不是先把整条序列压成一个全局向量再分类。当前实现会同时使用两类信息：
 
-池化后的特征是：
+- 沿 Anchor 轨迹采样得到的视觉特征 `pooled: [B, C, NumAnchors, NumY]`
+- 由当前回归结果构造出的几何上下文 `cls_geo: [B, C, NumAnchors, NumY]`
 
-- `pooled: [B, C, NumAnchors, NumY]`
+其中 `cls_geo` 的来源是：
 
-分类前会先在 `NumY` 维上做平均池化，变成：
+1. 先将 `reg_final.detach()` 变形为 `[B * NumAnchors, 1, NumY]`
+2. 经过 `reg_proj`
+3. 再经过 `cls_geo_encoder`
+4. 最后 reshape 回 `[B, C, NumAnchors, NumY]`
 
-- `pooled_mean: [B, C, NumAnchors]`
-
-也就是：
-
-- 每条 Anchor 对应一个全局描述向量
+这意味着分类头看到的不只是图像外观特征，还能看到“当前这条 Anchor 被回归头修正成了什么几何形状”。
 
 #### 3.9.2 为什么支持 masked pooling
 
 当前代码支持 `use_masked_pooling=True`。
 
-这意味着平均时不是简单对所有 y 点取均值，而是：
+但 mask 的作用位置不是一开始就把 `pooled` 直接平均成 `pooled_mean`，而是：
 
-- 只在 Anchor 自己有效的采样点上求平均
+- 先把分类输入序列按有效点掩码做逐点屏蔽
+- 再在分类头输出的 `NumY` 维上做 masked average
 
 原因是很多 Anchor 尤其 side anchor：
 
 - 并不是在所有 y 位置都落在图像内
 
-如果直接无掩码平均，就会把无效区域引入噪声。
+如果直接无掩码聚合，就会把越界区域的无效响应混进最终分数。
 
 因此 masked pooling 的实际意义是：
 
-“只在这条 Anchor 真正存在于图像内部的那段轨迹上汇总特征。”
+“只在这条 Anchor 真正位于图像内部的那段轨迹上累积分类证据。”
 
 #### 3.9.3 分类头的结构
 
-分类头是一个简单的 `Conv1d` 序列：
+当前分类头不是一个只看全局均值的简化 MLP，也不是两个 `1x1 Conv1d` 的浅层头。它的结构是：
 
-- `Conv1d(in_channels, in_channels, 1)`
-- `BatchNorm1d`
-- `ReLU`
-- `Conv1d(in_channels, 1, 1)`
+- `cls_seq_encoder`：两层 `Conv1d + BatchNorm1d + ReLU`
+- `cls_pred`：`Conv1d(in_channels, 1, kernel_size=1)`
 
-最后输出：
+实际张量流为：
 
-- `cls_logits: [B, NumAnchors]`
+- 先把 `pooled` 与 `cls_geo` 在通道维拼接，得到 `cls_seq_input: [B, 2C, NumAnchors, NumY]`
+- 再变形为 `[B * NumAnchors, 2C, NumY]`
+- 经过 `cls_seq_encoder + cls_pred`，得到逐点分类响应 `cls_seq_logits: [B * NumAnchors, 1, NumY]`
+- 最后沿 `NumY` 维做 masked average 或普通 mean，得到 `cls_logits: [B, NumAnchors]`
+
+#### 3.9.4 输出语义
 
 这里不直接做 sigmoid，是因为训练时会把 logits 交给分类损失函数处理。
+
+配合当前 `QualityFocalLoss`，`cls_logits` 学习的是与 Anchor-GT 匹配质量对齐的分类分数，而不是纯二值存在概率。推理阶段再对它做 sigmoid，作为解码筛选分数使用。
 
 ### 3.10 回归分支为什么按“序列建模”
 
@@ -1089,17 +1097,7 @@ stage2 预测的是：
 
 - `pooled: [B, C, NumAnchors, NumY]`
 
-#### 3.13.5 分类阶段
-
-在 y 维上做有效点平均，得到：
-
-- `pooled_mean: [B, C, NumAnchors]`
-
-再通过分类头输出：
-
-- `cls_logits: [B, NumAnchors]`
-
-#### 3.13.6 回归阶段
+#### 3.13.5 回归阶段
 
 将 `pooled` 变形为：
 
@@ -1116,6 +1114,25 @@ stage2 预测的是：
 最终：
 
 - `reg_final: [B, NumAnchors, NumY]`
+
+#### 3.13.6 分类阶段
+
+分类阶段会使用：
+
+- 视觉特征 `pooled`
+- 几何上下文 `cls_geo`，它由 `reg_final.detach()` 经过 `reg_proj + cls_geo_encoder` 得到
+
+二者拼接后得到：
+
+- `cls_seq_input: [B, 2C, NumAnchors, NumY]`
+
+再 reshape 为：
+
+- `[B * NumAnchors, 2C, NumY]`
+
+送入 `cls_seq_encoder + cls_pred`，先得到逐点分类响应，再沿 `NumY` 维做 masked average 或 mean，最终输出：
+
+- `cls_logits: [B, NumAnchors]`
 
 #### 3.13.7 输出阶段
 
@@ -1295,7 +1312,7 @@ stage2 预测的是：
 它主要做了这些事情：
 
 1. 堆叠图像为 `images: [B, 3, H, W]`
-2. 堆叠分类标签为 `cls_labels: [B, NumAnchors]`
+2. 堆叠分类标签为 `cls_targets: [B, NumAnchors]`
 3. 堆叠回归标签为 `offset_labels: [B, NumAnchors, NumY]`
 4. 堆叠回归掩码为 `offset_masks: [B, NumAnchors, NumY]`
 5. 从 batch 的第一个样本重建一个共享的 `AnchorSet`
@@ -1396,13 +1413,13 @@ stage2 预测的是：
 
 当前项目训练时可能涉及 3 类损失：
 
-1. 分类损失：`QualityBCELoss`
+1. 分类损失：`QualityFocalLoss`
 2. 回归损失：`RegLoss`，内部为 `Smooth L1`
 3. 线形相似性损失：`SoftLineOverlapLoss`
 
 其中前两者是主损失，第三项是可选增强项。
 
-### 4.8 分类损失 `QualityBCELoss`
+### 4.8 分类损失 `QualityFocalLoss`
 
 分类损失定义在 `lane_det/losses/focal_loss.py`。
 
@@ -1411,11 +1428,11 @@ stage2 预测的是：
 输入是：
 
 - `inputs`：模型输出的 `cls_logits`
-- `targets`：`cls_target`
+- `targets`：batch 中的 `cls_targets`
 
 其中目标值取值为：
 
-- `(0, 1]`：正样本质量分数，当前实现中通常取匹配到的 `Line IoU`
+- `(0, 1]`：正样本质量分数，由匹配到的 `Line IoU` 经过 `_map_iou_to_cls_target(...)` 映射得到
 - `0`：负样本
 - `-1`：忽略样本
 
@@ -1437,20 +1454,20 @@ stage2 预测的是：
 
 #### 4.8.3 核心计算逻辑
 
-`QualityBCELoss` 内部先计算：
+`QualityFocalLoss` 内部先计算：
 
 - `binary_cross_entropy_with_logits`
 
-但它不会再额外做 focal reweighting，也不使用：
+然后分别对正负样本做不同的重加权：
 
-- `alpha`
-- `gamma`
+- 正样本权重与目标值本身相关，目标越高，正样本损失权重越大
+- 负样本使用 `alpha * sigmoid(inputs)^gamma` 的 focal 权重
 
-它的核心思想更接近于：
+它的核心思想可以理解为：
 
-- 直接用 BCE 监督分类分支
+- 用 BCEWithLogits 建立基础分类监督
 - 让正样本目标值携带匹配质量信息
-- 用目标值大小区分“强正样本”和“弱正样本”
+- 用 focal 方式压低大量简单负样本的影响
 
 #### 4.8.4 当前实现的一个重要细节
 
@@ -1672,7 +1689,7 @@ stage2 预测的是：
 从 DataLoader 取出一个 batch 后，会获得：
 
 - `images`
-- `cls_labels`
+- `cls_targets`
 - `offset_labels`
 - `offset_masks`
 - `anchors`
@@ -1978,7 +1995,7 @@ refinement 开启时，stage1 和 final 都会被监督。
 
 因此在真正得到“车道线坐标”之前，还必须经历后处理链路：
 
-1. 将 logits 转成概率分数
+1. 将 logits 做 sigmoid 分数化
 2. 筛掉低分 Anchor
 3. 将 `anchor_x + offset` 还原成真实车道坐标
 4. 清理无效点
@@ -2083,7 +2100,7 @@ refinement 开启时，stage1 和 final 都会被监督。
 
 - `scores = sigmoid(cls_logits)`
 
-因为训练时分类头输出的是 logits，推理时必须先转成概率分数。
+因为训练时分类头输出的是 logits，推理时要先做 sigmoid，把它转成与匹配质量对齐的筛选分数。
 
 接着会按阈值：
 
@@ -2151,27 +2168,28 @@ refinement 开启时，stage1 和 final 都会被监督。
 
 如果某条候选线的有效点太少，例如：
 
-- 少于 2 个点
+- 少于 `min_valid_points` 个点（当前默认值为 4）
 
 就直接丢弃，因为这样的“车道线”几乎没有几何意义，也无法可靠评估和可视化。
 
-### 5.9 为什么候选线还要按 `score * sqrt(length)` 排序
+### 5.9 为什么候选线现在只按 `score` 排序
 
-解码器在做 NMS 之前，会对候选车道进行排序，排序依据不是单纯分数，而是：
+解码器在做 NMS 之前，会对候选车道进行排序。当前实现不再混入长度项，而是直接按：
 
-- `score * sqrt(length)`
+- `score`
 
-这个设计很有针对性。它说明作者不希望只按分类分数决定优先级，而是希望：
+做降序排序。
 
-- 分数高的线优先
-- 同时有效长度更长的线也更占优势
+这样设计的原因是：
 
-因为在车道线任务里，一条很短但分数偶然高的线，并不一定比一条更长、更完整的线更可靠。
+- 当前分类分数本身就是质量感知分数
+- decode 阶段的保留优先级需要和训练时的分类语义保持一致
+- 车道过短的问题已经由 `min_valid_points` 过滤和后续几何 NMS 负责约束
 
-所以这里其实是在平衡：
+因此这里的策略是：
 
-- 分类置信度
-- 车道线的覆盖长度
+- 先按分类质量分数决定候选优先级
+- 再通过几何约束去掉重复或不稳定的候选
 
 ### 5.10 车道线 NMS 为什么不能照搬检测框 NMS
 
@@ -2630,18 +2648,19 @@ Converter 会将每条 lane 的有效点：
 - 用 lane NMS 比较整条线的重合程度
 - 用 polyfit 修正整条线的连续性
 
-#### 5.24.2 它不信任单一分数，而强调综合质量
+#### 5.24.2 它用质量分数定优先级，再用几何规则做去重
 
 这体现在：
 
-- 候选排序用 `score * sqrt(length)`
+- 候选排序只按 `score`
 - NMS 同时看共同区间、整体均距、顶部和底部距离
 
 这说明作者更看重：
 
-- 长且稳定的线
+- 先让质量感知分类分数决定保留顺序
+- 再让整条线的几何关系决定是否视为重复
 
-而不是只看分类分数高不高。
+而不是把所有因素都混进一个手工排序公式里。
 
 #### 5.24.3 它把训练验证和离线推理统一在同一条后处理链上
 
@@ -2901,7 +2920,7 @@ Converter 会将每条 lane 的有效点：
 这个测试会：
 
 1. 构造随机 logits 和 target
-2. 测试 `QualityBCELoss`
+2. 测试 `QualityFocalLoss`
 3. 构造随机回归输入、目标和 mask
 4. 测试 `RegLoss`
 
@@ -3144,10 +3163,10 @@ Converter 会将每条 lane 的有效点：
 9. `DataLoader` 将样本组成 batch
 10. `LaneDetector` 通过 `ResNet18 + FPN + AnchorHead` 提取和预测
 11. `AnchorFeaturePooler` 沿 Anchor 轨迹采样多尺度特征
-12. 分类头输出每条 Anchor 的存在分数
+12. 分类头输出每条 Anchor 的质量感知分类分数
 13. 回归头输出每条 Anchor 的逐点偏移
 14. refinement 阶段对回归结果做二次细化
-15. 使用 `QualityBCELoss + SmoothL1 + 可选 line loss` 联合训练
+15. 使用 `QualityFocalLoss + SmoothL1 + 可选 line loss` 联合训练
 16. 使用 `Adam + MultiStepLR + 梯度累计` 更新参数
 17. 每个 epoch 后在验证集上做完整解码与评估
 18. 保存 `epoch`、`last`、`best` checkpoint

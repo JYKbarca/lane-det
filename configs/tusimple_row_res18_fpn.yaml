@@ -26,6 +26,7 @@ loss:
   exist_weight: 1.0
   row_valid_weight: 1.0
   grid_weight: 1.0
+  coord_weight: 1.0
   diff_weight: 0.2
 
 train:
