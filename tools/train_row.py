@@ -78,6 +78,21 @@ def resolve_val_list_file(cfg):
     return os.path.join(root, "val.json")
 
 
+def resolve_training_schedule(cfg):
+    train_cfg = cfg.get("train", {})
+    if "epochs" not in train_cfg:
+        raise KeyError("Missing required config key: train.epochs")
+
+    num_epochs = int(train_cfg["epochs"])
+    if num_epochs <= 0:
+        raise ValueError(f"train.epochs must be > 0, got {num_epochs}")
+
+    milestones = [int(m) for m in train_cfg.get("lr_milestones", [12, 18])]
+    milestones = sorted({m for m in milestones if 0 < m < num_epochs})
+    lr_gamma = float(train_cfg.get("lr_gamma", 0.3))
+    return num_epochs, milestones, lr_gamma
+
+
 def build_collate_fn(target_builder):
     def collate_fn(batch):
         batch = [sample for sample in batch if sample is not None]
@@ -220,9 +235,15 @@ def main():
     logger.info(f"Val dataset size: {len(val_dataset)}")
     logger.info(f"Val list file: {val_cfg['dataset']['list_file']}")
 
+    num_epochs, lr_milestones, lr_gamma = resolve_training_schedule(cfg)
+    logger.info(
+        f"Training schedule from config: epochs={num_epochs}, "
+        f"lr_milestones={lr_milestones}, lr_gamma={lr_gamma}"
+    )
+
     model = RowLaneDetector(cfg).to(device)
     optimizer = build_optimizer(model, cfg)
-    scheduler = MultiStepLR(optimizer, milestones=cfg["train"].get("lr_milestones", [12, 18]), gamma=cfg["train"].get("lr_gamma", 0.3))
+    scheduler = MultiStepLR(optimizer, milestones=lr_milestones, gamma=lr_gamma)
 
     exist_criterion = nn.BCEWithLogitsLoss()
     row_valid_criterion = nn.BCEWithLogitsLoss()
@@ -243,7 +264,12 @@ def main():
         for _ in range(start_epoch):
             scheduler.step()
 
-    num_epochs = int(cfg["train"]["epochs"])
+    if start_epoch >= num_epochs:
+        raise ValueError(
+            f"Configured train.epochs={num_epochs}, but resume would start from epoch {start_epoch + 1}. "
+            "Increase train.epochs in the config or resume from an earlier checkpoint."
+        )
+
     logger.info("Start training...")
     for epoch in range(start_epoch, num_epochs):
         model.train()
