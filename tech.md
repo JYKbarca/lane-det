@@ -66,8 +66,8 @@
 6. 在共享表示之后，进入两条检测路线之一
 7. 分支 A：生成 Ray Anchor，完成 Anchor-GT 匹配，构造 `cls_label + offset_label + offset_valid_mask`
 8. 分支 A：`LaneDetector` 输出每条 Anchor 的分类分数和逐点偏移，并经过解码、NMS、平滑后导出结果
-9. 分支 B：`RowTargetBuilder` 将车道线整理为固定槽位、固定 row 的 `exist + grid_targets`
-10. 分支 B：`RowLaneDetector` 输出 `exist_logits + grid_logits`，并经过 row 解码后直接导出结果
+9. 分支 B：`RowTargetBuilder` 将车道线整理为固定槽位、固定 row 的 `exist + x_coords + coord_mask`
+10. 分支 B：`RowLaneDetector` 输出 `exist_logits + row_valid_logits + grid_logits`，并经过 row 解码后直接导出结果
 11. 两条分支最终都通过 `TuSimpleConverter` 输出 `pred.json`
 12. 两条分支最终都通过 `LaneEval` 计算 `Accuracy`、`FP`、`FN`
 13. 通过 `vis_dataset.py`、`visualize.py`、`visualize_row.py`、`plot_loss.py` 回查问题并继续迭代
@@ -187,7 +187,7 @@
 1. 读取 YAML 配置
 2. 加载指定 checkpoint
 3. 创建 `TuSimpleDataset(..., split="train" / "val" / "test")`
-4. 批量推理 `exist_logits + grid_logits`
+4. 批量推理 `exist_logits + row_valid_logits + grid_logits`
 5. 通过 row 解码恢复连续车道坐标
 6. 转为 TuSimple 输出格式并保存
 
@@ -500,7 +500,6 @@ Anchor 集只依赖这些固定因素：
   - `exist_targets`
   - `x_targets_norm`
   - `coord_masks`
-  - `grid_targets`
   - `row_h_samples`
   - `metas`
 
@@ -2941,7 +2940,7 @@ Converter 会将每条 lane 的有效点：
 
 1. 构造简化版 `RowLaneHead`
 2. 输入随机特征图
-3. 检查 `exist_logits` 和 `grid_logits` 的 shape
+3. 检查 `exist_logits`、`row_valid_logits` 和 `grid_logits` 的 shape
 4. 检查横向布局变化是否会影响位置分类输出
 
 它主要用于验证：
@@ -3285,8 +3284,8 @@ Converter 会将每条 lane 的有效点：
 2. 最多保留前 `K` 条车道，不足则补空槽位
 3. 为每条槽位生成 `exist`
 4. 为每条槽位生成连续坐标 `x_coords` 和有效点掩码 `coord_mask`
-5. 将连续 `x` 离散到宽度网格上，得到 `grid_targets`
-6. 保留 `row_h_samples`，供后续解码与导出使用
+5. 保留 `row_h_samples`，供后续解码与导出使用
+6. `RowTargetBuilder` 内部仍会额外生成 `grid_targets`，但当前训练主链在 `collate_fn` 中主要使用的是归一化连续坐标 `x_targets_norm`
 
 这样一来，任务就从：
 
@@ -3294,7 +3293,7 @@ Converter 会将每条 lane 的有效点：
 
 变成了：
 
-`固定槽位是否存在车道 + 每个 row 上车道位于哪个横向网格`
+`固定槽位是否存在车道 + 每个 row 是否有效 + 每个有效 row 的横向位置分布`
 
 这条路线最核心的变化是：
 
@@ -3310,6 +3309,8 @@ Converter 会将每条 lane 的有效点：
 - Neck：`LaneFPN`
 - Head：`RowLaneHead`
 
+其中 `RowLaneDetector` 会从 `LaneFPN` 的多尺度输出中取最高分辨率特征图，送入 `RowLaneHead`。
+
 `RowLaneHead` 的核心流程可以概括为：
 
 1. 对 FPN 输出特征做卷积投影
@@ -3317,39 +3318,41 @@ Converter 会将每条 lane 的有效点：
 3. 使用 `grid_encoder` 编码二维网格特征
 4. 使用 `row_encoder` 编码逐 row 的上下文
 5. 引入可学习的 `lane_queries` 作为固定槽位的语义查询
-6. 输出：
+6. 将 `row_feat`、`lane_queries` 及其逐元素交互项拼接后，经 `row_fuse` 得到每个槽位、每个 row 的 lane feature
+7. 输出：
    - `exist_logits [B, K]`
-   - `grid_logits [B, K, num_y, num_grids + 1]`
-
-其中 `grid_logits` 的最后一个类别表示：
-
-- 当前 row 没有车道点
+   - `row_valid_logits [B, K, num_y]`
+   - `grid_logits [B, K, num_y, num_grids]`
 
 因此，这条路线虽然仍然是结构化车道线检测，但它已经不再沿 Anchor 轨迹建模，而是改成了：
 
-- 沿固定 row 做位置分类
-- 再通过期望解码恢复连续横坐标
+- 先预测槽位级存在性
+- 再预测每个 row 是否有效
+- 最后对有效 row 的横向位置分布建模，并通过期望解码恢复连续横坐标
 
 ### 7.5 Row/Grid 分支的训练、推理与可视化
 
-训练脚本 `tools/train_row.py` 主要完成三类损失计算：
+训练脚本 `tools/train_row.py` 主要完成五类损失计算：
 
 - `exist_loss`：`BCEWithLogitsLoss`
-- `grid_loss`：对 `grid_targets` 的 `CrossEntropyLoss`
+- `row_valid_loss`：`BCEWithLogitsLoss`
+- `grid_loss`：基于 `x_targets_norm + coord_masks` 的 soft grid supervision
+- `coord_loss`：对期望解码坐标和连续目标坐标做逐点约束
 - `smooth_loss`：基于期望解码坐标的二阶差分平滑约束
 
 总体损失形式可以概括为：
 
-`loss = exist_weight * exist_loss + grid_weight * grid_loss + diff_weight * smooth_loss`
+`loss = exist_weight * exist_loss + row_valid_weight * row_valid_loss + grid_weight * grid_loss + coord_weight * coord_loss + diff_weight * smooth_loss`
 
 推理脚本 `tools/infer_row.py` 的核心流程是：
 
 1. 读取 checkpoint
-2. 前向得到 `exist_logits + grid_logits`
+2. 前向得到 `exist_logits + row_valid_logits + grid_logits`
 3. 对 `exist_logits` 做 sigmoid，筛掉低分槽位
-4. 对 `grid_logits` 做 softmax
-5. 通过网格概率恢复 `x` 坐标，并用最后一个类别判断某个 row 是否有效
-6. 直接生成车道线字典，再通过 `TuSimpleConverter` 导出
+4. 对 `row_valid_logits` 做 sigmoid，得到每个槽位在每个 row 上的有效性掩码
+5. 通过 `grid_logits` 的期望解码恢复连续 `x` 坐标
+6. 使用连续性规则 `build_continuous_valid_mask(...)` 清理离散断点和异常跳变
+7. 生成车道线字典，再通过 `TuSimpleConverter` 导出
 
 这意味着相较于 `anchor-based` 路线，当前 row/grid 分支在推理阶段显著简化了链路：
 

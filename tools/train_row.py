@@ -19,6 +19,7 @@ from evaluate import LaneEval
 from lane_det.datasets import RowTargetBuilder, TuSimpleDataset
 from lane_det.metrics import TuSimpleConverter
 from lane_det.models import RowLaneDetector
+from lane_det.utils.row_continuity import build_continuous_valid_mask
 from lane_det.utils.row_supervision import compute_coord_loss, compute_expected_x, compute_soft_grid_loss
 
 
@@ -133,30 +134,66 @@ def compute_smoothness_loss(pred, target, mask):
     loss = torch.abs(pred_diff2 - target_diff2) * diff_mask
     return loss.sum() / diff_mask.sum().clamp(min=1.0)
 
-def decode_row_predictions(exist_logits, row_valid_logits, grid_logits, row_h_samples, score_thr, row_valid_thr, img_w, num_grids):
+def decode_row_predictions(
+    exist_logits,
+    row_valid_logits,
+    grid_logits,
+    row_h_samples,
+    score_thr,
+    row_valid_thr,
+    img_w,
+    num_grids,
+    min_segment_points=2,
+    max_row_gap=0,
+    max_dx_ratio=1.0,
+):
     exist_scores = torch.sigmoid(exist_logits)
     row_valid_scores = torch.sigmoid(row_valid_logits)
     valid_mask = (row_valid_scores >= row_valid_thr).to(torch.uint8)
     x_coords = compute_expected_x(grid_logits, num_grids)
     x_coords = x_coords * max(float(img_w) - 1.0, 1.0)
+    max_dx = float(max_dx_ratio) * max(float(img_w) - 1.0, 1.0)
     lanes_batch = []
     for scores_b, mask_b, coords_b, ys_b in zip(exist_scores, valid_mask, x_coords, row_h_samples):
         lane_dicts = []
         for lane_score, lane_mask, lane_xs in zip(scores_b, mask_b, coords_b):
             if float(lane_score) < score_thr:
                 continue
-            if int(lane_mask.sum()) < 2:
+            lane_mask_np = lane_mask.detach().cpu().numpy()
+            lane_xs_np = lane_xs.detach().cpu().numpy()
+            lane_mask_np = build_continuous_valid_mask(
+                lane_mask_np,
+                x_coords=lane_xs_np,
+                min_segment_points=min_segment_points,
+                max_row_gap=max_row_gap,
+                max_dx=max_dx,
+            )
+            if int(lane_mask_np.sum()) < int(min_segment_points):
                 continue
-            lane_dicts.append({"x_list": lane_xs.detach().cpu().numpy(), "y_samples": ys_b.detach().cpu().numpy(), "valid_mask": lane_mask.detach().cpu().numpy()})
+            lane_dicts.append(
+                {
+                    "x_list": lane_xs_np,
+                    "y_samples": ys_b.detach().cpu().numpy(),
+                    "valid_mask": lane_mask_np,
+                }
+            )
         lanes_batch.append(lane_dicts)
     return lanes_batch
 
 
 def validate(model, loader, samples, cfg, device):
     model.eval()
-    score_thr = float(cfg.get("eval", {}).get("exist_score_thr", 0.5))
-    row_valid_thr = float(cfg.get("eval", {}).get("row_valid_score_thr", 0.5))
-    converter = TuSimpleConverter()
+    eval_cfg = cfg.get("eval", {})
+    score_thr = float(eval_cfg.get("exist_score_thr", 0.5))
+    row_valid_thr = float(eval_cfg.get("row_valid_score_thr", 0.5))
+    continuity_min_segment_points = int(eval_cfg.get("continuity_min_segment_points", 3))
+    continuity_max_row_gap = int(eval_cfg.get("continuity_max_row_gap", 1))
+    continuity_max_dx_ratio = float(eval_cfg.get("continuity_max_dx_ratio", 0.08))
+    converter = TuSimpleConverter(
+        min_segment_points=continuity_min_segment_points,
+        max_row_gap=continuity_max_row_gap,
+        max_dx_ratio=continuity_max_dx_ratio,
+    )
     gt_map = {item["raw_file"]: item for item in samples}
     total_acc = 0.0
     total_fp = 0.0
@@ -179,6 +216,9 @@ def validate(model, loader, samples, cfg, device):
                 row_valid_thr,
                 images.shape[-1],
                 model.head.num_grids,
+                continuity_min_segment_points,
+                continuity_max_row_gap,
+                continuity_max_dx_ratio,
             )
             img_h, img_w = images.shape[-2:]
             for lane_dicts, meta in zip(decoded_batch, metas):

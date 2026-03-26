@@ -3,16 +3,27 @@ import json
 import os
 from typing import List, Dict, Any
 
+from lane_det.utils.row_continuity import extract_continuous_segments
+
 class TuSimpleConverter:
     """
     Convert decoded lanes to TuSimple evaluation format.
     """
-    def __init__(self, target_h_samples: List[int] = None):
+    def __init__(
+        self,
+        target_h_samples: List[int] = None,
+        min_segment_points: int = 2,
+        max_row_gap: int = 0,
+        max_dx_ratio: float = 1.0,
+    ):
         if target_h_samples is None:
             # Default TuSimple h_samples: 160 to 710, step 10
             self.target_h_samples = list(range(160, 720, 10))
         else:
             self.target_h_samples = target_h_samples
+        self.min_segment_points = int(min_segment_points)
+        self.max_row_gap = int(max_row_gap)
+        self.max_dx_ratio = float(max_dx_ratio)
 
     def convert(
         self,
@@ -42,66 +53,52 @@ class TuSimpleConverter:
         scale_y = ori_h / img_h
         
         for lane in lanes_list:
-            # Get valid points
-            valid_mask = lane['valid_mask'] > 0
-            if valid_mask.sum() < 2:
+            full_valid_mask = np.asarray(lane["valid_mask"], dtype=np.uint8) > 0
+            full_xs = np.asarray(lane["x_list"], dtype=np.float32)
+            full_ys = np.asarray(lane["y_samples"], dtype=np.float32)
+            if full_valid_mask.sum() < self.min_segment_points:
                 continue
-                
-            # Get x, y in model coordinates
-            xs = lane['x_list'][valid_mask]
-            ys = lane['y_samples'][valid_mask]
-            
-            # Rescale to original coordinates
-            xs_ori = xs * scale_x
-            ys_ori = ys * scale_y
-            
-            # Sort by y (increasing) for interpolation
-            sort_idx = np.argsort(ys_ori)
-            ys_sorted = ys_ori[sort_idx]
-            xs_sorted = xs_ori[sort_idx]
 
-            # --- PolyFit Refinement Removed ---
-            # We rely on the decoder's polyfit (if enabled) to avoid double-reshaping the lanes.
-            # --------------------------------
-            
-            # Interpolate to target h_samples
-            # We use -2 to indicate invalid points (TuSimple convention)
-            # np.interp returns extrapolated values if not handled, 
-            # so we use left/right parameters.
-            
-            # However, we also want to mark points as -2 if they are too far 
-            # from the predicted range? 
-            # Usually, we only output points within the y-range covered by the lane.
-            # But TuSimple requires values for ALL h_samples. 
-            # If a lane doesn't cover a h_sample, it should be -2.
-            
-            # Check range
-            y_min = ys_sorted.min()
-            y_max = ys_sorted.max()
-            
-            interp_xs = np.interp(cur_h_samples, ys_sorted, xs_sorted, left=-2, right=-2)
-            
-            # Refine: if target_h is strictly outside [y_min, y_max], ensure it is -2.
-            # (np.interp left/right handles strictly outside, but let's be explicit if needed)
-            
-            # Convert to list
-            lane_out = []
-            for i, x in enumerate(interp_xs):
-                # Double check range (optional, np.interp handles it with left/right)
+            segments = extract_continuous_segments(
+                full_valid_mask,
+                x_coords=full_xs,
+                min_segment_points=self.min_segment_points,
+                max_row_gap=self.max_row_gap,
+                max_dx=self.max_dx_ratio * max(float(img_w) - 1.0, 1.0),
+            )
+            if not segments:
+                continue
+
+            lane_out = np.full(len(cur_h_samples), -2.0, dtype=np.float32)
+            cur_h_samples_np = np.asarray(cur_h_samples, dtype=np.float32)
+            for segment in segments:
+                xs_ori = full_xs[segment] * scale_x
+                ys_ori = full_ys[segment] * scale_y
+                sort_idx = np.argsort(ys_ori)
+                ys_sorted = ys_ori[sort_idx]
+                xs_sorted = xs_ori[sort_idx]
+                if ys_sorted.shape[0] < 2:
+                    continue
+
+                y_min = ys_sorted.min()
+                y_max = ys_sorted.max()
+                interp_mask = (cur_h_samples_np >= y_min) & (cur_h_samples_np <= y_max)
+                if not np.any(interp_mask):
+                    continue
+                lane_out[interp_mask] = np.interp(cur_h_samples_np[interp_mask], ys_sorted, xs_sorted)
+
+            lane_out_list = []
+            for x in lane_out.tolist():
                 if x == -2:
-                    lane_out.append(-2)
+                    lane_out_list.append(-2)
+                elif x < 0 or x >= ori_w:
+                    lane_out_list.append(-2)
                 else:
-                    # Also check if x is within image width
-                    if x < 0 or x >= ori_w:
-                        lane_out.append(-2)
-                    else:
-                        lane_out.append(float(x))
-            
-            # Only add lane if it has enough valid points?
-            # TuSimple doesn't strictly require this, but empty lanes are useless.
-            valid_cnt = sum(1 for x in lane_out if x != -2)
+                    lane_out_list.append(float(x))
+
+            valid_cnt = sum(1 for x in lane_out_list if x != -2)
             if valid_cnt > 2:
-                output_lanes.append(lane_out)
+                output_lanes.append(lane_out_list)
                 
         return {
             "raw_file": raw_file,

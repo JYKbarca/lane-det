@@ -40,6 +40,9 @@ train:
 eval:
   exist_score_thr: 0.7
   row_valid_score_thr: 0.5
+  continuity_min_segment_points: 3
+  continuity_max_row_gap: 1
+  continuity_max_dx_ratio: 0.08
 
 augmentation:
   flip_p: 0.5

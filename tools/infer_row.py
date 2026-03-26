@@ -89,6 +89,10 @@ def main():
         if args.row_valid_score_thr is not None
         else float(cfg.get("eval", {}).get("row_valid_score_thr", 0.5))
     )
+    eval_cfg = cfg.get("eval", {})
+    continuity_min_segment_points = int(eval_cfg.get("continuity_min_segment_points", 3))
+    continuity_max_row_gap = int(eval_cfg.get("continuity_max_row_gap", 1))
+    continuity_max_dx_ratio = float(eval_cfg.get("continuity_max_dx_ratio", 0.08))
 
     split = args.split
     if split is None:
@@ -128,7 +132,11 @@ def main():
     model.load_state_dict(state_dict)
     model.eval()
 
-    converter = TuSimpleConverter()
+    converter = TuSimpleConverter(
+        min_segment_points=continuity_min_segment_points,
+        max_row_gap=continuity_max_row_gap,
+        max_dx_ratio=continuity_max_dx_ratio,
+    )
     results = []
 
     with torch.no_grad():
@@ -150,6 +158,9 @@ def main():
                 row_valid_thr,
                 images.shape[-1],
                 model.head.num_grids,
+                continuity_min_segment_points,
+                continuity_max_row_gap,
+                continuity_max_dx_ratio,
             )
 
             img_h, img_w = images.shape[-2:]

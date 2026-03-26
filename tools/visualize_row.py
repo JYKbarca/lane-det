@@ -14,13 +14,15 @@ def load_jsonl(path):
 
 def draw_lanes(image, lanes, h_samples, color, thickness=2):
     for lane in lanes:
-        pts = []
+        prev_pt = None
         for x, y in zip(lane, h_samples):
             if x < 0:
+                prev_pt = None
                 continue
-            pts.append((int(round(x)), int(round(y))))
-        for p0, p1 in zip(pts[:-1], pts[1:]):
-            cv2.line(image, p0, p1, color, thickness)
+            pt = (int(round(x)), int(round(y)))
+            if prev_pt is not None:
+                cv2.line(image, prev_pt, pt, color, thickness)
+            prev_pt = pt
     return image
 
 
