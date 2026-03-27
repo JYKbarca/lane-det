@@ -6,6 +6,7 @@ import os
 import sys
 import time
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,6 +21,11 @@ from lane_det.datasets import RowTargetBuilder, TuSimpleDataset
 from lane_det.metrics import TuSimpleConverter
 from lane_det.models import RowLaneDetector
 from lane_det.utils.row_continuity import build_continuous_valid_mask
+from lane_det.utils.row_diagnostics import (
+    finalize_row_diagnostic_stats,
+    init_row_diagnostic_stats,
+    update_row_diagnostic_stats,
+)
 from lane_det.utils.row_supervision import compute_coord_loss, compute_expected_x, compute_soft_grid_loss
 
 
@@ -147,38 +153,73 @@ def decode_row_predictions(
     max_row_gap=0,
     max_dx_ratio=1.0,
 ):
-    exist_scores = torch.sigmoid(exist_logits)
-    row_valid_scores = torch.sigmoid(row_valid_logits)
-    valid_mask = (row_valid_scores >= row_valid_thr).to(torch.uint8)
-    x_coords = compute_expected_x(grid_logits, num_grids)
-    x_coords = x_coords * max(float(img_w) - 1.0, 1.0)
-    max_dx = float(max_dx_ratio) * max(float(img_w) - 1.0, 1.0)
+    exist_scores, x_coords, _, clean_valid_mask, row_h_samples_np = build_decoding_masks(
+        exist_logits,
+        row_valid_logits,
+        grid_logits,
+        row_h_samples,
+        score_thr,
+        row_valid_thr,
+        img_w,
+        num_grids,
+        min_segment_points,
+        max_row_gap,
+        max_dx_ratio,
+    )
     lanes_batch = []
-    for scores_b, mask_b, coords_b, ys_b in zip(exist_scores, valid_mask, x_coords, row_h_samples):
+    for scores_b, mask_b, coords_b, ys_b in zip(exist_scores, clean_valid_mask, x_coords, row_h_samples_np):
         lane_dicts = []
         for lane_score, lane_mask, lane_xs in zip(scores_b, mask_b, coords_b):
-            if float(lane_score) < score_thr:
+            if float(lane_score) < float(score_thr):
                 continue
-            lane_mask_np = lane_mask.detach().cpu().numpy()
-            lane_xs_np = lane_xs.detach().cpu().numpy()
+            lane_dicts.append(
+                {
+                    "x_list": lane_xs,
+                    "y_samples": ys_b,
+                    "valid_mask": lane_mask,
+                }
+            )
+        lanes_batch.append(lane_dicts)
+    return lanes_batch
+
+
+def build_decoding_masks(
+    exist_logits,
+    row_valid_logits,
+    grid_logits,
+    row_h_samples,
+    score_thr,
+    row_valid_thr,
+    img_w,
+    num_grids,
+    min_segment_points=2,
+    max_row_gap=0,
+    max_dx_ratio=1.0,
+):
+    exist_scores = torch.sigmoid(exist_logits).detach().cpu().numpy()
+    raw_valid_mask = (torch.sigmoid(row_valid_logits) >= row_valid_thr).to(torch.uint8).detach().cpu().numpy()
+    x_coords = compute_expected_x(grid_logits, num_grids)
+    x_coords = (x_coords * max(float(img_w) - 1.0, 1.0)).detach().cpu().numpy()
+    row_h_samples_np = row_h_samples.detach().cpu().numpy()
+    clean_valid_mask = np.zeros_like(raw_valid_mask, dtype=np.uint8)
+    max_dx = float(max_dx_ratio) * max(float(img_w) - 1.0, 1.0)
+
+    for batch_idx in range(raw_valid_mask.shape[0]):
+        for lane_idx in range(raw_valid_mask.shape[1]):
+            if float(exist_scores[batch_idx, lane_idx]) < float(score_thr):
+                continue
             lane_mask_np = build_continuous_valid_mask(
-                lane_mask_np,
-                x_coords=lane_xs_np,
+                raw_valid_mask[batch_idx, lane_idx],
+                x_coords=x_coords[batch_idx, lane_idx],
                 min_segment_points=min_segment_points,
                 max_row_gap=max_row_gap,
                 max_dx=max_dx,
             )
             if int(lane_mask_np.sum()) < int(min_segment_points):
                 continue
-            lane_dicts.append(
-                {
-                    "x_list": lane_xs_np,
-                    "y_samples": ys_b.detach().cpu().numpy(),
-                    "valid_mask": lane_mask_np,
-                }
-            )
-        lanes_batch.append(lane_dicts)
-    return lanes_batch
+            clean_valid_mask[batch_idx, lane_idx] = lane_mask_np
+
+    return exist_scores, x_coords, raw_valid_mask, clean_valid_mask, row_h_samples_np
 
 
 def validate(model, loader, samples, cfg, device):
@@ -199,14 +240,30 @@ def validate(model, loader, samples, cfg, device):
     total_fp = 0.0
     total_fn = 0.0
     count = 0
+    diagnostic_stats = init_row_diagnostic_stats()
     with torch.no_grad():
         for batch in loader:
             if batch is None:
                 continue
             images = batch["images"].to(device)
             row_h_samples = batch["row_h_samples"].to(device)
+            exist_targets = batch["exist_targets"].cpu().numpy()
+            coord_masks = batch["coord_masks"].cpu().numpy()
             metas = batch["metas"]
             exist_logits, row_valid_logits, grid_logits = model(images)
+            _, _, raw_valid_mask, clean_valid_mask, _ = build_decoding_masks(
+                exist_logits,
+                row_valid_logits,
+                grid_logits,
+                row_h_samples,
+                score_thr,
+                row_valid_thr,
+                images.shape[-1],
+                model.head.num_grids,
+                continuity_min_segment_points,
+                continuity_max_row_gap,
+                continuity_max_dx_ratio,
+            )
             decoded_batch = decode_row_predictions(
                 exist_logits,
                 row_valid_logits,
@@ -221,10 +278,24 @@ def validate(model, loader, samples, cfg, device):
                 continuity_max_dx_ratio,
             )
             img_h, img_w = images.shape[-2:]
-            for lane_dicts, meta in zip(decoded_batch, metas):
+            for lane_dicts, gt_exist, gt_mask, pred_raw_mask, pred_clean_mask, meta in zip(
+                decoded_batch,
+                exist_targets,
+                coord_masks,
+                raw_valid_mask,
+                clean_valid_mask,
+                metas,
+            ):
                 gt = gt_map.get(meta["raw_file"])
                 if gt is None:
                     continue
+                update_row_diagnostic_stats(
+                    diagnostic_stats,
+                    gt_exist=gt_exist,
+                    gt_valid_mask=gt_mask,
+                    raw_valid_mask=pred_raw_mask,
+                    clean_valid_mask=pred_clean_mask,
+                )
                 pred = converter.convert(lane_dicts, meta["raw_file"], img_w, img_h, ori_w=1280, ori_h=720, target_h_samples=gt["h_samples"])
                 acc, fp, fn = LaneEval.bench(pred["lanes"], gt["lanes"], gt["h_samples"], pred["run_time"])
                 total_acc += acc
@@ -233,7 +304,9 @@ def validate(model, loader, samples, cfg, device):
                 count += 1
     if count == 0:
         raise RuntimeError("No validation samples were evaluated.")
-    return {"Accuracy": total_acc / count, "FP": total_fp / count, "FN": total_fn / count}
+    metrics = {"Accuracy": total_acc / count, "FP": total_fp / count, "FN": total_fn / count}
+    metrics.update(finalize_row_diagnostic_stats(diagnostic_stats))
+    return metrics
 
 
 def main():
@@ -373,6 +446,14 @@ def main():
 
         val_metrics = validate(model, val_loader, val_dataset.samples, cfg, device)
         logger.info(f"Validation: Accuracy={val_metrics['Accuracy']:.6f}, FP={val_metrics['FP']:.6f}, FN={val_metrics['FN']:.6f}")
+        logger.info(
+            "Validation Diagnostics: "
+            f"RawRowRecall={val_metrics['RawRowRecall']:.6f}, "
+            f"FinalRowRecall={val_metrics['FinalRowRecall']:.6f}, "
+            f"UpperRowRecall={val_metrics['UpperRowRecall']:.6f}, "
+            f"LowerRowRecall={val_metrics['LowerRowRecall']:.6f}, "
+            f"CleanupKeepRate={val_metrics['CleanupKeepRate']:.6f}"
+        )
 
         scheduler.step()
         logger.info(f"Epoch [{epoch+1}/{num_epochs}] Current LR: {optimizer.param_groups[0]['lr']:.6f}")
