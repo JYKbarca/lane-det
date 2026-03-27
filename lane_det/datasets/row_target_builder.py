@@ -2,18 +2,35 @@ import numpy as np
 
 
 class RowTargetBuilder:
-    def __init__(self, num_lanes=5, num_y=56, num_grids=100):
+    def __init__(
+        self,
+        num_lanes=5,
+        num_y=56,
+        num_grids=100,
+        order_tail_points=6,
+        order_min_tail_points=3,
+        order_bottom_weight=2.5,
+    ):
         self.num_lanes = int(num_lanes)
         self.num_y = int(num_y)
         self.num_grids = int(num_grids)
+        self.order_tail_points = int(order_tail_points)
+        self.order_min_tail_points = int(order_min_tail_points)
+        self.order_bottom_weight = float(order_bottom_weight)
 
     def _lane_order_key(self, lane_xs, lane_mask):
         valid_idx = np.flatnonzero(lane_mask > 0)
         if valid_idx.size == 0:
             return float("inf")
 
-        # Use average of all valid points for more stable sorting
-        return float(np.mean(lane_xs[valid_idx]))
+        if valid_idx.size < self.order_min_tail_points:
+            return float(np.mean(lane_xs[valid_idx]))
+
+        tail_count = min(self.order_tail_points, valid_idx.size)
+        tail_idx = valid_idx[-tail_count:]
+        tail_xs = lane_xs[tail_idx].astype(np.float32)
+        weights = np.linspace(1.0, self.order_bottom_weight, tail_count, dtype=np.float32)
+        return float(np.average(tail_xs, weights=weights))
 
     def build(self, lanes, valid_mask, h_samples, img_width):
         lanes = np.asarray(lanes, dtype=np.float32)
