@@ -26,6 +26,7 @@ from lane_det.utils.row_diagnostics import (
     init_row_diagnostic_stats,
     update_row_diagnostic_stats,
 )
+from lane_det.utils.row_matching import build_matched_targets
 from lane_det.utils.row_supervision import compute_coord_loss, compute_expected_x, compute_soft_grid_loss
 
 
@@ -365,6 +366,9 @@ def main():
     grid_weight = float(cfg.get("loss", {}).get("grid_weight", 1.0))
     coord_weight = float(cfg.get("loss", {}).get("coord_weight", 1.0))
     diff_weight = float(cfg.get("loss", {}).get("diff_weight", 0.0))
+    match_exist_cost_weight = float(cfg.get("loss", {}).get("match_exist_cost_weight", 0.2))
+    match_row_valid_cost_weight = float(cfg.get("loss", {}).get("match_row_valid_cost_weight", 1.0))
+    match_coord_cost_weight = float(cfg.get("loss", {}).get("match_coord_cost_weight", 2.0))
 
     start_epoch = 0
     best_acc = float("-inf")
@@ -404,12 +408,23 @@ def main():
 
             optimizer.zero_grad()
             exist_logits, row_valid_logits, grid_logits = model(images)
-            exist_loss = exist_criterion(exist_logits, exist_targets)
-            row_valid_loss = row_valid_criterion(row_valid_logits, coord_masks)
             expected_x_norm = compute_expected_x(grid_logits, model.head.num_grids)
-            grid_loss = compute_soft_grid_loss(grid_logits, x_targets_norm, coord_masks, model.head.num_grids)
-            coord_loss = compute_coord_loss(expected_x_norm, x_targets_norm, coord_masks, model.head.num_grids)
-            smooth_loss = compute_smoothness_loss(expected_x_norm, x_targets_norm, coord_masks)
+            matched_exist_targets, matched_x_targets, matched_coord_masks, _ = build_matched_targets(
+                exist_logits,
+                row_valid_logits,
+                expected_x_norm,
+                exist_targets,
+                x_targets_norm,
+                coord_masks,
+                exist_cost_weight=match_exist_cost_weight,
+                row_valid_cost_weight=match_row_valid_cost_weight,
+                coord_cost_weight=match_coord_cost_weight,
+            )
+            exist_loss = exist_criterion(exist_logits, matched_exist_targets)
+            row_valid_loss = row_valid_criterion(row_valid_logits, matched_coord_masks)
+            grid_loss = compute_soft_grid_loss(grid_logits, matched_x_targets, matched_coord_masks, model.head.num_grids)
+            coord_loss = compute_coord_loss(expected_x_norm, matched_x_targets, matched_coord_masks, model.head.num_grids)
+            smooth_loss = compute_smoothness_loss(expected_x_norm, matched_x_targets, matched_coord_masks)
             loss = (
                 exist_weight * exist_loss
                 + row_valid_weight * row_valid_loss

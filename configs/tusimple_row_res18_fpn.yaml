@@ -28,6 +28,9 @@ loss:
   grid_weight: 1.0
   coord_weight: 1.0
   diff_weight: 0.2
+  match_exist_cost_weight: 0.2
+  match_row_valid_cost_weight: 1.0
+  match_coord_cost_weight: 2.0
 
 train:
   batch_size: 4

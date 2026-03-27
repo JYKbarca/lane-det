@@ -27,7 +27,7 @@ class TestRowTargetBuilder(unittest.TestCase):
         self.assertLess(target["grid_targets"][0, 0], 10)
         self.assertEqual(target["coord_mask"][0, 2], 0.0)
 
-    def test_ordering_prefers_bottom_weighted_geometry(self):
+    def test_ordering_uses_mean_of_all_valid_points(self):
         builder = RowTargetBuilder(num_lanes=2, num_y=6, num_grids=10)
         lanes = np.array(
             [
@@ -41,20 +41,8 @@ class TestRowTargetBuilder(unittest.TestCase):
 
         target = builder.build(lanes, valid_mask, h_samples, img_width=128.0)
 
-        np.testing.assert_array_equal(target["x_coords"][0], lanes[1])
-        np.testing.assert_array_equal(target["x_coords"][1], lanes[0])
-
-    def test_ordering_falls_back_to_global_mean_for_short_lanes(self):
-        builder = RowTargetBuilder(num_lanes=2, num_y=4, num_grids=10, order_min_tail_points=3)
-        lane_a = np.array([10.0, 20.0, 0.0, 0.0], dtype=np.float32)
-        lane_b = np.array([30.0, 40.0, 0.0, 0.0], dtype=np.float32)
-
-        key_a = builder._lane_order_key(lane_a, np.array([1, 1, 0, 0], dtype=np.uint8))
-        key_b = builder._lane_order_key(lane_b, np.array([1, 1, 0, 0], dtype=np.uint8))
-
-        self.assertAlmostEqual(key_a, 15.0)
-        self.assertAlmostEqual(key_b, 35.0)
-        self.assertLess(key_a, key_b)
+        np.testing.assert_array_equal(target["x_coords"][0], lanes[0])
+        np.testing.assert_array_equal(target["x_coords"][1], lanes[1])
 
 
 if __name__ == "__main__":
