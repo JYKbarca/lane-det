@@ -50,3 +50,18 @@ augmentation:
   contrast: 0.3
   saturation: 0.3
   color_p: 0.8
+  occlusion_p: 0.35
+  occlusion_num_range: [1, 2]
+  occlusion_width_range: [0.08, 0.18]
+  occlusion_height_range: [0.08, 0.22]
+  shadow_p: 0.3
+  shadow_width_range: [0.2, 0.5]
+  shadow_height_range: [0.2, 0.45]
+  shadow_darkness_range: [0.45, 0.75]
+  shadow_x_drift_ratio: 0.08
+  blur_p: 0.2
+  blur_kernel_choices: [3, 5]
+  geom_p: 0.0
+  max_translate_x_ratio: 0.04
+  max_translate_y_ratio: 0.03
+  max_shear_x_ratio: 0.08
