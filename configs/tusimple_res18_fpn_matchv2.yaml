@@ -26,6 +26,9 @@ anchor:
   side_angle_min: 10.0
   num_y: 56
   # Line IoU based assignment
+  line_iou_pos_thr: 0.35
+  line_iou_pos_thr_bottom: 0.38
+  line_iou_pos_thr_side: 0.27
   line_iou_neg_thr: 0.10
   line_iou_width: 25.0
   line_iou_width_bottom: 25.0

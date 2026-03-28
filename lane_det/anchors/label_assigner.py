@@ -21,6 +21,7 @@ class LabelAssigner:
     def __init__(
         self,
         neg_thr: float,
+        pos_thr: float = 0.35,
         min_common_points: int = 6,
         min_common_ratio: float = 0.5,
         line_iou_width: float = 15.0,
@@ -35,6 +36,8 @@ class LabelAssigner:
         top_max_mean_err_side: float | None = None,
         line_iou_width_bottom: float | None = None,
         line_iou_width_side: float | None = None,
+        pos_thr_bottom: float | None = None,
+        pos_thr_side: float | None = None,
         min_common_points_bottom: int | None = None,
         min_common_points_side: int | None = None,
         top_min_points_bottom: int | None = None,
@@ -51,6 +54,7 @@ class LabelAssigner:
         pos_score_min: float = 0.6,
     ):
         self.neg_thr = float(neg_thr)
+        self.pos_thr = float(pos_thr)
         self.min_common_points = int(min_common_points)
         self.min_common_ratio = float(min_common_ratio)
         self.line_iou_width = float(line_iou_width)
@@ -65,6 +69,8 @@ class LabelAssigner:
         self.top_max_mean_err_side = float(top_max_mean_err if top_max_mean_err_side is None else top_max_mean_err_side)
         self.line_iou_width_bottom = float(line_iou_width if line_iou_width_bottom is None else line_iou_width_bottom)
         self.line_iou_width_side = float(line_iou_width if line_iou_width_side is None else line_iou_width_side)
+        self.pos_thr_bottom = float(pos_thr if pos_thr_bottom is None else pos_thr_bottom)
+        self.pos_thr_side = float(pos_thr if pos_thr_side is None else pos_thr_side)
         self.min_common_points_bottom = int(min_common_points if min_common_points_bottom is None else min_common_points_bottom)
         self.min_common_points_side = int(min_common_points if min_common_points_side is None else min_common_points_side)
         self.top_min_points_bottom = int(top_min_points if top_min_points_bottom is None else top_min_points_bottom)
@@ -90,6 +96,7 @@ class LabelAssigner:
         global_soft = bool(mcfg.get("use_soft_gating", False))
         return cls(
             neg_thr=float(mcfg.get("neg_thr", acfg.get("line_iou_neg_thr", 0.35))),
+            pos_thr=float(acfg.get("line_iou_pos_thr", 0.35)),
             min_common_points=int(acfg.get("min_common_points", 6)),
             min_common_ratio=float(acfg.get("min_common_ratio", 0.5)),
             line_iou_width=float(acfg.get("line_iou_width", 15.0)),
@@ -104,6 +111,8 @@ class LabelAssigner:
             top_max_mean_err_side=acfg.get("top_max_mean_err_side", None),
             line_iou_width_bottom=acfg.get("line_iou_width_bottom", None),
             line_iou_width_side=acfg.get("line_iou_width_side", None),
+            pos_thr_bottom=acfg.get("line_iou_pos_thr_bottom", None),
+            pos_thr_side=acfg.get("line_iou_pos_thr_side", None),
             min_common_points_bottom=acfg.get("min_common_points_bottom", None),
             min_common_points_side=acfg.get("min_common_points_side", None),
             top_min_points_bottom=acfg.get("top_min_points_bottom", None),
@@ -484,18 +493,27 @@ class LabelAssigner:
         invalid_best = best_iou < 0
         best_gt[invalid_best] = -1
 
-        pos = force_pos
-        neg = (best_iou >= 0) & (~pos)
+        is_side_anchor = anchor_valid_mask[:, -1] == 0
+        pos_thr_req = np.where(is_side_anchor, self.pos_thr_side, self.pos_thr_bottom).astype(np.float32)
+        base_pos = valid_best & (best_iou >= pos_thr_req)
+        pos = base_pos | force_pos
+        neg = (best_iou < self.neg_thr) & (~pos)
 
         cls_target[neg] = 0.0
-        matched_gt_idx[force_pos] = force_gt_idx[force_pos]
+        matched_gt_idx[base_pos] = best_gt[base_pos]
+        extra_force_pos = force_pos & (~base_pos)
+        matched_gt_idx[extra_force_pos] = force_gt_idx[extra_force_pos]
         pos_ids = np.where(pos)[0]
         for a in pos_ids:
             g = matched_gt_idx[a]
+            if g < 0:
+                continue
             cls_target[a] = self._map_iou_to_cls_target(float(iou_mat[a, g]))
 
         for a in pos_ids:
             g = matched_gt_idx[a]
+            if g < 0:
+                continue
             common = (anchor_valid_mask[a] > 0) & (gt_valid_mask[g] > 0)
             if not np.any(common):
                 continue
