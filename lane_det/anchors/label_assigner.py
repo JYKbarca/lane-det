@@ -410,13 +410,17 @@ class LabelAssigner:
         invalid_best = best_iou < 0
         best_gt[invalid_best] = -1
 
+        is_side_anchor = anchor_valid_mask[:, -1] == 0
+        pos_thr_req = np.where(is_side_anchor, self.pos_thr_side, self.pos_thr_bottom).astype(np.float32)
+
         # Keep historical field semantics for downstream visualization: lower is better.
         # Use (1 - IoU), invalid pairs stay +inf.
         valid_best = best_iou >= 0
         min_dist[valid_best] = 1.0 - best_iou[valid_best]
+        base_pos = valid_best & (best_iou >= pos_thr_req)
 
-        # Positive anchors are defined only by top-k quality matches per GT.
-        # All other valid anchors become negatives instead of additional positives.
+        # top-k matching only supplements the threshold-based positives above.
+        # It should never be the sole source of positives for a GT.
         force_pos = np.zeros((num_anchors,), dtype=bool)
         force_gt_idx = np.full((num_anchors,), -1, dtype=np.int64)
         if self.topk_per_gt > 0 and num_gt > 0:
@@ -433,69 +437,47 @@ class LabelAssigner:
                         force_pos[a] = True
                         force_gt_idx[a] = g
 
-            # --- Fallback guarantee: every GT gets at least 1 positive anchor ---
-            # If a GT has no positive anchor after top-k filtering, fall back to the
-            # anchor with the highest *raw* IoU, ignoring all gate results.
-            # We must ensure anchors are not "stolen" by later GTs, leaving earlier GTs empty.
-            
-            # 1. Find which GTs still need an anchor
+            # --- Fallback guarantee for still-unmatched GTs ---
+            # Step 2 rule: fallback can only choose anchors that already passed the
+            # existing hard-gated match pipeline, and they must still reach
+            # min_force_pos_iou so the resulting cls_target is a real positive.
+            # It must NOT recompute a raw IoU path that bypasses angle/x_bottom gating.
+            # Also, GTs that already have threshold positives should not trigger fallback.
             gt_has_pos = np.zeros(num_gt, dtype=bool)
-            for a in np.where(force_pos)[0]:
-                gt_has_pos[force_gt_idx[a]] = True
+            for a in np.where(base_pos)[0]:
+                g = int(best_gt[a])
+                if g >= 0:
+                    gt_has_pos[g] = True
+            extra_force_pos = force_pos & (~base_pos)
+            for a in np.where(extra_force_pos)[0]:
+                g = int(force_gt_idx[a])
+                if g >= 0:
+                    gt_has_pos[g] = True
 
-            # 2. Assign fallback anchors, avoiding already claimed ones if possible
+            claimed_mask = base_pos | force_pos
+
+            for a in np.where(force_pos)[0]:
+                claimed_mask[a] = True
+
             for g in range(num_gt):
                 if gt_has_pos[g]:
                     continue
-                    
-                # Recompute raw IoU without any gating for this GT
-                raw_common = (anchor_valid_mask > 0) & (gt_valid_mask[g][None, :] > 0)
-                raw_common_count = raw_common.sum(axis=1)
-                is_side = anchor_valid_mask[:, -1] == 0
-                raw_width = np.where(is_side, self.line_iou_width_side, self.line_iou_width_bottom)
-                raw_iou = self._line_iou(anchor_xs, gt_lanes[g], raw_common, raw_width)
-                
-                # Require at least some overlap
-                raw_iou[raw_common_count < 2] = -1.0
-                
-                if raw_iou.max() <= 0:
-                    continue
-                    
-                # Try to find the best anchor that isn't already claimed by another GT
-                unclaimed_mask = ~force_pos
-                unclaimed_iou = raw_iou.copy()
-                unclaimed_iou[~unclaimed_mask] = -1.0
-                
-                if unclaimed_iou.max() > 0:
-                    # Found an unclaimed anchor
-                    best_a = int(np.argmax(unclaimed_iou))
+
+                gated_iou = iou_mat[:, g].copy()
+                gated_iou[claimed_mask] = -1.0
+                gated_iou[gated_iou < self.min_force_pos_iou] = -1.0
+
+                if gated_iou.max() >= self.min_force_pos_iou:
+                    best_a = int(np.argmax(gated_iou))
                     force_pos[best_a] = True
                     force_gt_idx[best_a] = g
-                    iou_mat[best_a, g] = raw_iou[best_a]
+                    gt_has_pos[g] = True
+                    claimed_mask[best_a] = True
                 else:
-                    # All overlapping anchors are claimed by other GTs.
-                    # We CANNOT steal, because that would leave another GT empty.
-                    # Instead, we allow this anchor to be assigned to the CURRENT GT as well.
-                    # Wait, force_gt_idx is a 1D array, so an anchor can only point to ONE GT.
-                    # If we overwrite force_gt_idx[best_a], we steal it.
-                    # If we don't overwrite it, this GT gets nothing.
-                    # Since an anchor can only regress to one GT, if two GTs perfectly overlap
-                    # and share the exact same anchors, they are essentially duplicates.
-                    # Leaving one GT without an anchor is the ONLY mathematically sound choice 
-                    # when using a 1D assignment array.
+                    # No sufficiently good legal candidate remains after hard gating.
+                    # Keep the GT as unmatched instead of fabricating a pseudo-positive.
                     pass
-                
-        # --- Crucial Sync: Recompute best_gt and best_iou after fallback ---
-        # Fallback modifies iou_mat, so we must update these to prevent mismatch
-        # between matched_gt_idx and best_gt_idx in downstream loss/stats.
-        best_gt = np.argmax(iou_mat, axis=1)
-        best_iou = iou_mat[np.arange(num_anchors), best_gt]
-        invalid_best = best_iou < 0
-        best_gt[invalid_best] = -1
 
-        is_side_anchor = anchor_valid_mask[:, -1] == 0
-        pos_thr_req = np.where(is_side_anchor, self.pos_thr_side, self.pos_thr_bottom).astype(np.float32)
-        base_pos = valid_best & (best_iou >= pos_thr_req)
         pos = base_pos | force_pos
         neg = (best_iou < self.neg_thr) & (~pos)
 
