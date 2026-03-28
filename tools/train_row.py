@@ -141,6 +141,63 @@ def compute_smoothness_loss(pred, target, mask):
     loss = torch.abs(pred_diff2 - target_diff2) * diff_mask
     return loss.sum() / diff_mask.sum().clamp(min=1.0)
 
+
+def compute_row_loss_terms(
+    exist_logits,
+    row_valid_logits,
+    grid_logits,
+    exist_targets,
+    x_targets_norm,
+    coord_masks,
+    num_grids,
+    exist_criterion,
+    row_valid_criterion,
+    cfg,
+):
+    loss_cfg = cfg.get("loss", {})
+    exist_weight = float(loss_cfg.get("exist_weight", 1.0))
+    row_valid_weight = float(loss_cfg.get("row_valid_weight", 1.0))
+    grid_weight = float(loss_cfg.get("grid_weight", 1.0))
+    coord_weight = float(loss_cfg.get("coord_weight", 1.0))
+    diff_weight = float(loss_cfg.get("diff_weight", 0.0))
+    match_exist_cost_weight = float(loss_cfg.get("match_exist_cost_weight", 0.2))
+    match_row_valid_cost_weight = float(loss_cfg.get("match_row_valid_cost_weight", 1.0))
+    match_coord_cost_weight = float(loss_cfg.get("match_coord_cost_weight", 2.0))
+
+    expected_x_norm = compute_expected_x(grid_logits, num_grids)
+    matched_exist_targets, matched_x_targets, matched_coord_masks, _ = build_matched_targets(
+        exist_logits,
+        row_valid_logits,
+        expected_x_norm,
+        exist_targets,
+        x_targets_norm,
+        coord_masks,
+        exist_cost_weight=match_exist_cost_weight,
+        row_valid_cost_weight=match_row_valid_cost_weight,
+        coord_cost_weight=match_coord_cost_weight,
+    )
+    exist_loss = exist_criterion(exist_logits, matched_exist_targets)
+    row_valid_loss = row_valid_criterion(row_valid_logits, matched_coord_masks)
+    grid_loss = compute_soft_grid_loss(grid_logits, matched_x_targets, matched_coord_masks, num_grids)
+    coord_loss = compute_coord_loss(expected_x_norm, matched_x_targets, matched_coord_masks, num_grids)
+    smooth_loss = compute_smoothness_loss(expected_x_norm, matched_x_targets, matched_coord_masks)
+    total_loss = (
+        exist_weight * exist_loss
+        + row_valid_weight * row_valid_loss
+        + grid_weight * grid_loss
+        + coord_weight * coord_loss
+        + diff_weight * smooth_loss
+    )
+
+    return {
+        "total_loss": total_loss,
+        "exist_loss": exist_loss,
+        "row_valid_loss": row_valid_loss,
+        "grid_loss": grid_loss,
+        "coord_loss": coord_loss,
+        "smooth_loss": smooth_loss,
+    }
+
 def decode_row_predictions(
     exist_logits,
     row_valid_logits,
@@ -223,7 +280,7 @@ def build_decoding_masks(
     return exist_scores, x_coords, raw_valid_mask, clean_valid_mask, row_h_samples_np
 
 
-def validate(model, loader, samples, cfg, device):
+def validate(model, loader, samples, cfg, device, exist_criterion, row_valid_criterion):
     model.eval()
     eval_cfg = cfg.get("eval", {})
     score_thr = float(eval_cfg.get("exist_score_thr", 0.5))
@@ -241,6 +298,8 @@ def validate(model, loader, samples, cfg, device):
     total_fp = 0.0
     total_fn = 0.0
     count = 0
+    total_val_loss = 0.0
+    loss_batches = 0
     diagnostic_stats = init_row_diagnostic_stats()
     with torch.no_grad():
         for batch in loader:
@@ -248,10 +307,27 @@ def validate(model, loader, samples, cfg, device):
                 continue
             images = batch["images"].to(device)
             row_h_samples = batch["row_h_samples"].to(device)
-            exist_targets = batch["exist_targets"].cpu().numpy()
-            coord_masks = batch["coord_masks"].cpu().numpy()
+            exist_targets = batch["exist_targets"].to(device)
+            x_targets_norm = batch["x_targets_norm"].to(device)
+            coord_masks = batch["coord_masks"].to(device)
             metas = batch["metas"]
             exist_logits, row_valid_logits, grid_logits = model(images)
+            loss_terms = compute_row_loss_terms(
+                exist_logits,
+                row_valid_logits,
+                grid_logits,
+                exist_targets,
+                x_targets_norm,
+                coord_masks,
+                model.head.num_grids,
+                exist_criterion,
+                row_valid_criterion,
+                cfg,
+            )
+            total_val_loss += float(loss_terms["total_loss"].item())
+            loss_batches += 1
+            exist_targets_np = exist_targets.detach().cpu().numpy()
+            coord_masks_np = coord_masks.detach().cpu().numpy()
             _, _, raw_valid_mask, clean_valid_mask, _ = build_decoding_masks(
                 exist_logits,
                 row_valid_logits,
@@ -281,8 +357,8 @@ def validate(model, loader, samples, cfg, device):
             img_h, img_w = images.shape[-2:]
             for lane_dicts, gt_exist, gt_mask, pred_raw_mask, pred_clean_mask, meta in zip(
                 decoded_batch,
-                exist_targets,
-                coord_masks,
+                exist_targets_np,
+                coord_masks_np,
                 raw_valid_mask,
                 clean_valid_mask,
                 metas,
@@ -305,7 +381,12 @@ def validate(model, loader, samples, cfg, device):
                 count += 1
     if count == 0:
         raise RuntimeError("No validation samples were evaluated.")
-    metrics = {"Accuracy": total_acc / count, "FP": total_fp / count, "FN": total_fn / count}
+    metrics = {
+        "ValLoss": total_val_loss / max(loss_batches, 1),
+        "Accuracy": total_acc / count,
+        "FP": total_fp / count,
+        "FN": total_fn / count,
+    }
     metrics.update(finalize_row_diagnostic_stats(diagnostic_stats))
     return metrics
 
@@ -408,30 +489,24 @@ def main():
 
             optimizer.zero_grad()
             exist_logits, row_valid_logits, grid_logits = model(images)
-            expected_x_norm = compute_expected_x(grid_logits, model.head.num_grids)
-            matched_exist_targets, matched_x_targets, matched_coord_masks, _ = build_matched_targets(
+            loss_terms = compute_row_loss_terms(
                 exist_logits,
                 row_valid_logits,
-                expected_x_norm,
+                grid_logits,
                 exist_targets,
                 x_targets_norm,
                 coord_masks,
-                exist_cost_weight=match_exist_cost_weight,
-                row_valid_cost_weight=match_row_valid_cost_weight,
-                coord_cost_weight=match_coord_cost_weight,
+                model.head.num_grids,
+                exist_criterion,
+                row_valid_criterion,
+                cfg,
             )
-            exist_loss = exist_criterion(exist_logits, matched_exist_targets)
-            row_valid_loss = row_valid_criterion(row_valid_logits, matched_coord_masks)
-            grid_loss = compute_soft_grid_loss(grid_logits, matched_x_targets, matched_coord_masks, model.head.num_grids)
-            coord_loss = compute_coord_loss(expected_x_norm, matched_x_targets, matched_coord_masks, model.head.num_grids)
-            smooth_loss = compute_smoothness_loss(expected_x_norm, matched_x_targets, matched_coord_masks)
-            loss = (
-                exist_weight * exist_loss
-                + row_valid_weight * row_valid_loss
-                + grid_weight * grid_loss
-                + coord_weight * coord_loss
-                + diff_weight * smooth_loss
-            )
+            loss = loss_terms["total_loss"]
+            exist_loss = loss_terms["exist_loss"]
+            row_valid_loss = loss_terms["row_valid_loss"]
+            grid_loss = loss_terms["grid_loss"]
+            coord_loss = loss_terms["coord_loss"]
+            smooth_loss = loss_terms["smooth_loss"]
             loss.backward()
             optimizer.step()
 
@@ -459,7 +534,8 @@ def main():
             f"Grid: {epoch_grid_loss / denom:.4f}, Coord: {epoch_coord_loss / denom:.4f}, Smooth: {epoch_smooth_loss / denom:.4f})"
         )
 
-        val_metrics = validate(model, val_loader, val_dataset.samples, cfg, device)
+        val_metrics = validate(model, val_loader, val_dataset.samples, cfg, device, exist_criterion, row_valid_criterion)
+        logger.info(f"Epoch [{epoch+1}/{num_epochs}] Val Loss: {val_metrics['ValLoss']:.4f}")
         logger.info(f"Validation: Accuracy={val_metrics['Accuracy']:.6f}, FP={val_metrics['FP']:.6f}, FN={val_metrics['FN']:.6f}")
         logger.info(
             "Validation Diagnostics: "

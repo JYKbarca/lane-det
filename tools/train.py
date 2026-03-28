@@ -108,7 +108,7 @@ def resolve_val_list_file(cfg):
     return os.path.join(root, "val.json")
 
 
-def validate(model, loader, samples, cfg, device):
+def validate(model, loader, samples, cfg, device, cls_criterion, reg_criterion, line_criterion=None):
     model.eval()
     eval_cfg = cfg.get("eval", {})
     decoder = LaneDecoder(
@@ -129,6 +129,9 @@ def validate(model, loader, samples, cfg, device):
     total_fp = 0.0
     total_fn = 0.0
     count = 0
+    total_val_loss = 0.0
+    loss_batches = 0
+    use_refinement = bool(cfg.get("model", {}).get("use_refinement", False))
 
     with torch.no_grad():
         for batch in loader:
@@ -136,10 +139,43 @@ def validate(model, loader, samples, cfg, device):
                 continue
 
             images = batch["images"].to(device)
+            cls_targets = batch["cls_targets"].to(device)
+            offset_labels = batch["offset_labels"].to(device)
+            offset_masks = batch["offset_masks"].to(device)
+            matched_gt_idx = batch["matched_gt_idx"].to(device)
+            best_gt_idx = batch["best_gt_idx"].to(device)
+            best_ious = batch["best_ious"].to(device)
             anchors = batch["anchors"]
             metas = batch["metas"]
 
-            cls_logits, reg_preds = model(images, anchors)
+            if use_refinement:
+                cls_logits, reg_preds, aux = model(images, anchors, return_aux=True)
+                reg_stage1 = aux["reg_stage1"]
+                reg_stage2 = aux["reg_final"]
+            else:
+                cls_logits, reg_preds = model(images, anchors)
+                reg_stage1 = reg_preds
+                reg_stage2 = reg_preds
+
+            loss_terms = compute_anchor_loss_terms(
+                cls_logits,
+                reg_stage1,
+                reg_stage2,
+                cls_targets,
+                offset_labels,
+                offset_masks,
+                matched_gt_idx,
+                best_gt_idx,
+                best_ious,
+                cfg,
+                cls_criterion,
+                reg_criterion,
+                use_refinement=use_refinement,
+                line_criterion=line_criterion,
+            )
+            total_val_loss += float(loss_terms["total_loss"].item())
+            loss_batches += 1
+
             img_h, img_w = images.shape[2], images.shape[3]
             decoded_batch = decoder.decode(cls_logits, reg_preds, anchors, img_w, img_h)
 
@@ -173,6 +209,7 @@ def validate(model, loader, samples, cfg, device):
         raise RuntimeError("No validation samples were evaluated.")
 
     return {
+        "ValLoss": total_val_loss / max(loss_batches, 1),
         "Accuracy": total_acc / count,
         "FP": total_fp / count,
         "FN": total_fn / count,
@@ -259,6 +296,74 @@ def compute_local_rank_loss(
         return cls_logits.sum() * 0.0
 
     return torch.stack(batch_losses).mean()
+
+
+def compute_anchor_loss_terms(
+    cls_logits,
+    reg_stage1,
+    reg_stage2,
+    cls_targets,
+    offset_labels,
+    offset_masks,
+    matched_gt_idx,
+    best_gt_idx,
+    best_ious,
+    cfg,
+    cls_criterion,
+    reg_criterion,
+    use_refinement=False,
+    line_criterion=None,
+):
+    reg_stage1_w = float(cfg.get("loss", {}).get("reg_loss_stage1_weight", 0.5))
+    reg_stage2_w = float(cfg.get("loss", {}).get("reg_loss_stage2_weight", 1.0))
+    rank_weight = float(cfg.get("loss", {}).get("rank_weight", 1.0))
+    rank_margin = float(cfg.get("loss", {}).get("rank_margin", 0.2))
+    hard_neg_topk = int(cfg.get("loss", {}).get("hard_neg_topk", 2))
+    hard_neg_iou_min = float(cfg.get("loss", {}).get("hard_neg_iou_min", 0.2))
+    cls_weight = float(cfg.get("loss", {}).get("cls_weight", 1.0))
+    reg_weight = float(cfg.get("loss", {}).get("reg_weight", 1.0))
+    line_loss_weight = float(cfg.get("loss", {}).get("line_loss_weight", 0.1))
+
+    cls_loss = cls_criterion(cls_logits, cls_targets)
+    rank_loss = compute_local_rank_loss(
+        cls_logits,
+        cls_targets,
+        matched_gt_idx,
+        best_gt_idx,
+        best_ious,
+        margin=rank_margin,
+        hard_neg_topk=hard_neg_topk,
+        hard_neg_iou_min=hard_neg_iou_min,
+    )
+    reg1_loss = reg_criterion(reg_stage1, offset_labels, offset_masks)
+
+    if use_refinement:
+        reg2_loss = reg_criterion(reg_stage2, offset_labels, offset_masks)
+        reg_loss = reg_stage1_w * reg1_loss + reg_stage2_w * reg2_loss
+    else:
+        reg2_loss = reg_stage1.new_zeros(())
+        reg_loss = reg1_loss
+
+    total_loss = cls_weight * cls_loss + rank_weight * rank_loss + reg_weight * reg_loss
+    line_loss = reg_stage1.new_zeros(())
+    if line_criterion is not None:
+        line1_loss = line_criterion(reg_stage1, offset_labels, offset_masks)
+        if use_refinement:
+            line2_loss = line_criterion(reg_stage2, offset_labels, offset_masks)
+            line_loss = reg_stage1_w * line1_loss + reg_stage2_w * line2_loss
+        else:
+            line_loss = line1_loss
+        total_loss = total_loss + line_loss_weight * line_loss
+
+    return {
+        "total_loss": total_loss,
+        "cls_loss": cls_loss,
+        "rank_loss": rank_loss,
+        "reg_loss": reg_loss,
+        "reg1_loss": reg1_loss,
+        "reg2_loss": reg2_loss,
+        "line_loss": line_loss,
+    }
 
 
 def build_optimizer(model, cfg):
@@ -500,47 +605,29 @@ def main():
                 reg_stage1 = reg_preds
                 reg_stage2 = reg_preds
             
-            # Loss
-            cls_loss = cls_criterion(cls_logits, cls_targets)
-            rank_loss = compute_local_rank_loss(
+            loss_terms = compute_anchor_loss_terms(
                 cls_logits,
+                reg_stage1,
+                reg_stage2,
                 cls_targets,
+                offset_labels,
+                offset_masks,
                 matched_gt_idx,
                 best_gt_idx,
                 best_ious,
-                margin=rank_margin,
-                hard_neg_topk=hard_neg_topk,
-                hard_neg_iou_min=hard_neg_iou_min,
+                cfg,
+                cls_criterion,
+                reg_criterion,
+                use_refinement=use_refinement,
+                line_criterion=line_criterion if use_line_loss else None,
             )
-            reg1_loss = reg_criterion(reg_stage1, offset_labels, offset_masks)
-            
-            if use_refinement:
-                # Stage 2 learns to predict the residual (offset_labels - reg_stage1.detach())
-                # However, since reg2_loss is calculated on reg_stage2 (which is reg_stage1 + reg_delta_stage2),
-                # it's equivalent to penalizing the final prediction against the ground truth.
-                # We just need to make sure reg_stage2 is supervised correctly.
-                reg2_loss = reg_criterion(reg_stage2, offset_labels, offset_masks)
-                reg_loss = reg_stage1_w * reg1_loss + reg_stage2_w * reg2_loss
-            else:
-                reg2_loss = torch.tensor(0.0, device=device)
-                reg_loss = reg1_loss
-            
-            loss = (
-                cfg["loss"]["cls_weight"] * cls_loss
-                + rank_weight * rank_loss
-                + cfg["loss"]["reg_weight"] * reg_loss
-            )
-            
-            line_loss_val = 0.0
-            if use_line_loss:
-                line1_loss = line_criterion(reg_stage1, offset_labels, offset_masks)
-                if use_refinement:
-                    line2_loss = line_criterion(reg_stage2, offset_labels, offset_masks)
-                    line_loss = reg_stage1_w * line1_loss + reg_stage2_w * line2_loss
-                else:
-                    line_loss = line1_loss
-                loss += line_loss_weight * line_loss
-                line_loss_val = line_loss.item()
+            loss = loss_terms["total_loss"]
+            cls_loss = loss_terms["cls_loss"]
+            rank_loss = loss_terms["rank_loss"]
+            reg_loss = loss_terms["reg_loss"]
+            reg1_loss = loss_terms["reg1_loss"]
+            reg2_loss = loss_terms["reg2_loss"]
+            line_loss_val = float(loss_terms["line_loss"].item())
             
             (loss / accumulation_steps).backward()
             
@@ -588,7 +675,17 @@ def main():
             msg += f", Line: {avg_line:.4f}"
         logger.info(msg)
 
-        val_metrics = validate(model, val_loader, val_dataset.samples, cfg, device)
+        val_metrics = validate(
+            model,
+            val_loader,
+            val_dataset.samples,
+            cfg,
+            device,
+            cls_criterion,
+            reg_criterion,
+            line_criterion if use_line_loss else None,
+        )
+        logger.info(f"Epoch [{epoch+1}/{num_epochs}] Val Loss: {val_metrics['ValLoss']:.4f}")
         logger.info(
             f"Validation: Accuracy={val_metrics['Accuracy']:.6f}, "
             f"FP={val_metrics['FP']:.6f}, "

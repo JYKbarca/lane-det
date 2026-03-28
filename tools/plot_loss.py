@@ -1,84 +1,91 @@
 import argparse
 import os
 import re
+
 import matplotlib.pyplot as plt
-import numpy as np
+
+
+TRAIN_AVG_PATTERN = re.compile(
+    r"Epoch \[(\d+)/\d+\] Finished\..*Avg Loss: ([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
+)
+VAL_LOSS_PATTERN = re.compile(
+    r"Epoch \[(\d+)/\d+\] Val Loss: ([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
+)
+
 
 def parse_log(log_file):
-    steps = []
-    total_loss = []
-    cls_loss = []
-    reg_loss = []
-    
-    # Regex to match log line
-    # Example: Epoch [1/50], Step [10/816], Loss: 21.5384 (Cls: 0.0550, Reg: 21.4833)
-    pattern = re.compile(r"Epoch \[(\d+)/\d+\], Step \[(\d+)/\d+\], Loss: ([-\d.]+) \(Cls: ([-\d.]+), Reg: ([-\d.]+)\)")
-    
-    with open(log_file, 'r') as f:
-        for line in f:
-            match = pattern.search(line)
-            if match:
-                epoch = int(match.group(1))
-                step = int(match.group(2))
-                loss = float(match.group(3))
-                cls = float(match.group(4))
-                reg = float(match.group(5))
-                
-                # Global step calculation depends on steps per epoch
-                # We can just use simple index or calculate global step if we know steps per epoch
-                # Here we just store the raw values
-                steps.append(len(steps)) 
-                total_loss.append(loss)
-                cls_loss.append(cls)
-                reg_loss.append(reg)
-                
-    return steps, total_loss, cls_loss, reg_loss
+    train_loss_by_epoch = {}
+    val_loss_by_epoch = {}
 
-def plot_loss(steps, total, cls, reg, output_path):
-    plt.figure(figsize=(12, 6))
-    
-    # Plot Total Loss
-    plt.subplot(1, 2, 1)
-    plt.plot(steps, total, label='Total Loss', color='blue', alpha=0.7)
-    plt.title('Total Loss')
-    plt.xlabel('Steps')
-    plt.ylabel('Loss')
+    with open(log_file, "r", encoding="utf-8") as f:
+        for line in f:
+            train_match = TRAIN_AVG_PATTERN.search(line)
+            if train_match:
+                train_loss_by_epoch[int(train_match.group(1))] = float(train_match.group(2))
+
+            val_match = VAL_LOSS_PATTERN.search(line)
+            if val_match:
+                val_loss_by_epoch[int(val_match.group(1))] = float(val_match.group(2))
+
+    return train_loss_by_epoch, val_loss_by_epoch
+
+
+def plot_loss(train_loss_by_epoch, val_loss_by_epoch, output_path):
+    train_epochs = sorted(train_loss_by_epoch)
+    val_epochs = sorted(val_loss_by_epoch)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(
+        train_epochs,
+        [train_loss_by_epoch[epoch] for epoch in train_epochs],
+        marker="o",
+        linewidth=2,
+        label="Train Avg Loss",
+        color="tab:blue",
+    )
+    if val_epochs:
+        plt.plot(
+            val_epochs,
+            [val_loss_by_epoch[epoch] for epoch in val_epochs],
+            marker="s",
+            linewidth=2,
+            label="Val Loss",
+            color="tab:orange",
+        )
+
+    plt.title("Training and Validation Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
     plt.grid(True, alpha=0.3)
     plt.legend()
-    
-    # Plot Cls and Reg Loss
-    plt.subplot(1, 2, 2)
-    plt.plot(steps, cls, label='Cls Loss', color='red', alpha=0.7)
-    plt.plot(steps, reg, label='Reg Loss', color='green', alpha=0.7)
-    plt.title('Cls & Reg Loss')
-    plt.xlabel('Steps')
-    plt.ylabel('Loss')
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    
     plt.tight_layout()
     plt.savefig(output_path)
     print(f"Loss plot saved to {output_path}")
     plt.close()
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Plot Loss Curve from Log File")
+    parser = argparse.ArgumentParser(description="Plot epoch-level loss curves from train.log")
     parser.add_argument("--log", type=str, required=True, help="Path to train.log file")
-    parser.add_argument("--out", type=str, default="/root/autodl-tmp/outputs/lane-det/visualizations/loss_curve.png", help="Path to save plot image")
+    parser.add_argument("--out", type=str, default="outputs/visualizations/loss_curve.png", help="Path to save plot image")
     args = parser.parse_args()
-    
+
     if not os.path.exists(args.log):
         print(f"Error: Log file not found at {args.log}")
         return
-        
-    steps, total, cls, reg = parse_log(args.log)
-    
-    if not steps:
-        print("No loss data found in log file.")
+
+    train_loss_by_epoch, val_loss_by_epoch = parse_log(args.log)
+    if not train_loss_by_epoch:
+        print("No epoch-level train loss data found in log file.")
         return
-        
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    plot_loss(steps, total, cls, reg, args.out)
+    if not val_loss_by_epoch:
+        print("Warning: No val loss data found in log file. Plotting train loss only.")
+
+    out_dir = os.path.dirname(args.out)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    plot_loss(train_loss_by_epoch, val_loss_by_epoch, args.out)
+
 
 if __name__ == "__main__":
     main()
