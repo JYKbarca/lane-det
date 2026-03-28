@@ -201,8 +201,17 @@ def compute_local_rank_loss(
     hard_neg_topk=2,
     hard_neg_iou_min=0.2,
 ):
+    """Rank the strongest positive above same-GT threshold-gray candidates.
+
+    After Step 1, anchors in the IoU gray zone are marked as ignore for the
+    classification loss instead of strict negatives. Rank loss should mine these
+    near-positive ignore anchors, otherwise the default `neg_thr < hard_neg_iou_min`
+    setting produces a permanently zero signal.
+    """
     batch_losses = []
     batch_size = cls_logits.shape[0]
+    if int(hard_neg_topk) <= 0:
+        return cls_logits.sum() * 0.0
 
     for b in range(batch_size):
         logits_b = cls_logits[b]
@@ -227,19 +236,19 @@ def compute_local_rank_loss(
             primary_pos_id = gt_pos_ids[torch.argmax(gt_pos_scores)]
             pos_logit = logits_b[primary_pos_id]
 
-            neg_mask = (
-                (targets_b == 0)
+            hard_mask = (
+                (targets_b < 0)
                 & (best_gt_b == gt_id)
                 & (best_iou_b >= hard_neg_iou_min)
             )
-            neg_ids = torch.nonzero(neg_mask, as_tuple=True)[0]
-            if neg_ids.numel() == 0:
+            hard_ids = torch.nonzero(hard_mask, as_tuple=True)[0]
+            if hard_ids.numel() == 0:
                 continue
 
-            neg_iou = best_iou_b[neg_ids]
-            topk = min(int(hard_neg_topk), int(neg_ids.numel()))
-            hard_order = torch.argsort(neg_iou, descending=True)[:topk]
-            hard_neg_ids = neg_ids[hard_order]
+            hard_iou = best_iou_b[hard_ids]
+            topk = min(int(hard_neg_topk), int(hard_ids.numel()))
+            hard_order = torch.argsort(hard_iou, descending=True)[:topk]
+            hard_neg_ids = hard_ids[hard_order]
             neg_logits = logits_b[hard_neg_ids]
 
             rank_terms = torch.relu(margin - (pos_logit - neg_logits))

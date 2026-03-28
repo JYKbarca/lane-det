@@ -136,28 +136,41 @@ Step 2 已经完成，当前不再建议在 fallback 语义上继续追加新改
 
 在开始下一轮完整训练前，必须处理 rank loss，否则会继续带着“配置启用、训练失效”的损失项做实验。
 
-可选方案：
+当前状态：
 
-1. 临时方案：将 `rank_weight` 设为 `0`，先排除无效损失项干扰。
-2. 正式方案：重写 hard negative 选择逻辑，使其与当前 Step 1 的 `pos / ignore / neg` 语义一致。
+1. 已做过一轮 `Step 2 + rank_weight=0` 的短对照训练。
+2. 截至第 7 个 epoch，结果为：
+   - `Accuracy = 0.874367`
+   - `FP = 0.417127`
+   - `FN = 0.254098`
+3. 该结果低于上一轮最佳基线：
+   - `Accuracy = 0.879842`
+   - `FP = 0.414365`
+   - `FN = 0.249586`
+4. 说明仅修 fallback 语义而不恢复 rank mining，暂时没有带来指标提升。
 
-推荐顺序：
+已完成内容：
 
-- 若目标是尽快验证 Step 2 的收益，先临时关闭 rank loss。
-- 若目标是形成长期稳定方案，再补完整的 rank mining 逻辑。
+1. 已将 `compute_local_rank_loss()` 的 hard negative 选择逻辑改为：
+   - 从与正样本属于同一 `best_gt`
+   - 且 `best_iou >= hard_neg_iou_min`
+   - 且当前为 ignore 的“灰区样本”中选择
+2. 不再依赖“严格负样本 + 高 IoU”这一互相冲突的旧条件。
+
+当前结论：
+
+- `rank_weight=0` 只适合做隔离实验，不应作为最终训练配置长期保留。
+- 后续正式训练应恢复启用 rank loss，并观察日志中 `Rank` 是否出现稳定非零信号。
 
 ### 5.3 Step 3：补测试并修正统计
 
-需要补充：
+已完成内容：
 
-1. `topk_per_gt = 0` 时，阈值正样本逻辑正确。
-2. 高 IoU 但未进 top-k 的 anchor，不会被错误打成负样本。
-3. 被硬门控淘汰的 anchor，不会被 fallback 再翻正。
-4. `per_gt_pos_count` 基于 `matched_gt_idx` 统计，而不是 `argmax(iou_mat)`。
-
-建议新增：
-
-- `tests/test_label_assigner.py`
+1. `per_gt_pos_count` 已改为基于 `matched_gt_idx` 统计，而不是 `argmax(iou_mat)`。
+2. 已新增 `tests/test_label_assigner.py`，覆盖以下最小场景：
+   - `topk_per_gt = 0` 时仍能产出阈值正样本
+   - 被角度门控淘汰的 anchor 不会被 fallback 再翻正
+   - `per_gt_pos_count` 按真实 `matched_gt_idx` 计数
 
 ## 6. 配置与训练建议
 
@@ -207,13 +220,14 @@ Step 2 已经完成，当前不再建议在 fallback 语义上继续追加新改
 
 如果只做一个动作，优先级如下：
 
-1. 在下一轮训练前处理 rank loss 失效问题。
-2. 修正匹配统计逻辑并补最小测试。
+1. 用当前代码重新开启一轮短训练，并恢复服务器配置中的 `rank_weight`。
+2. 重点观察训练日志中的 `Rank` 是否从 `0.0000` 变为稳定非零。
+3. 若 `Rank` 仍为 0，再回头检查 `hard_neg_iou_min` 是否仍高于实际灰区 IoU 分布。
 
 原因：
 
-- Step 2 已经解决了当前最直接的伪正样本来源。
-- rank loss 当前是“配置上启用，训练中失效”，如果不先处理，下一轮训练依然难以解释。
+- fallback 语义、rank mining 语义和匹配统计口径现在已经基本对齐。
+- 当前最需要的是通过一轮短训练确认 `rank loss` 是否真正恢复为有效训练信号。
 
 ## 9. 预期结果
 

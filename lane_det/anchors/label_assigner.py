@@ -162,7 +162,7 @@ class LabelAssigner:
         iou[valid] = inter_sum[valid] / union_sum[valid]
         return iou
 
-    def _build_match_stats(self, num_gt, iou_mat, best_iou, cls_target, reason_masks):
+    def _build_match_stats(self, num_gt, iou_mat, best_iou, cls_target, matched_gt_idx, reason_masks):
         if num_gt <= 0:
             return {
                 "per_gt_max_iou": [],
@@ -183,7 +183,7 @@ class LabelAssigner:
 
         pos_ids = np.where(cls_target > 0)[0]
         for a in pos_ids:
-            g = int(np.argmax(iou_mat[a]))
+            g = int(matched_gt_idx[a])
             if g >= 0:
                 per_gt_pos_count[g] += 1
 
@@ -248,6 +248,7 @@ class LabelAssigner:
                     np.zeros((num_anchors, 0), dtype=np.float32),
                     np.full((num_anchors,), -1.0, dtype=np.float32),
                     cls_target,
+                    matched_gt_idx,
                     {
                         "all_common_fail": np.zeros((num_anchors,), dtype=bool),
                         "top_fail_any": np.zeros((num_anchors,), dtype=bool),
@@ -275,6 +276,7 @@ class LabelAssigner:
                     np.zeros((num_anchors, 0), dtype=np.float32),
                     np.full((num_anchors,), -1.0, dtype=np.float32),
                     cls_target,
+                    matched_gt_idx,
                     {
                         "all_common_fail": np.zeros((num_anchors,), dtype=bool),
                         "top_fail_any": np.zeros((num_anchors,), dtype=bool),
@@ -508,7 +510,7 @@ class LabelAssigner:
             "angle_fail_any": np.any(angle_fail_mat, axis=1),
             "xbottom_fail_any": np.any(xbottom_fail_mat, axis=1),
         }
-        match_stats = self._build_match_stats(num_gt, iou_mat, best_iou, cls_target, reason_masks)
+        match_stats = self._build_match_stats(num_gt, iou_mat, best_iou, cls_target, matched_gt_idx, reason_masks)
 
         return AssignedLabels(
             cls_target,
